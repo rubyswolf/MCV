@@ -336,6 +336,12 @@ def point_in_roi(point: np.ndarray, roi: tuple[int, int, int, int]) -> bool:
     return x0 <= float(point[0]) < x1 and y0 <= float(point[1]) < y1
 
 
+def line_endpoint_away_from_point(line: LineCandidate, point: np.ndarray) -> np.ndarray:
+    dist_a = float(np.linalg.norm(line.a.astype(np.float64) - point.astype(np.float64)))
+    dist_b = float(np.linalg.norm(line.b.astype(np.float64) - point.astype(np.float64)))
+    return line.a if dist_a >= dist_b else line.b
+
+
 def draw_ui(
     base: np.ndarray,
     pending: PendingSelection | None,
@@ -384,11 +390,19 @@ def draw_ui(
             cv2.circle(canvas, (cx, cy), 3, (0, 0, 255), -1, cv2.LINE_AA)
 
     if pending is not None:
+        preview_corner = estimate_corner_from_selection(pending) if len(pending.lines) >= 2 else None
         colors = [(255, 255, 0), (0, 255, 255), (255, 0, 255)]
         for i, line in enumerate(pending.lines):
             color = colors[i % len(colors)]
-            ax, ay = full_to_roi_display(line.a, roi, render)
-            bx, by = full_to_roi_display(line.b, roi, render)
+            if preview_corner is not None:
+                start = line_endpoint_away_from_point(line, preview_corner)
+                end = preview_corner
+            else:
+                start = line.a
+                end = line.b
+
+            ax, ay = full_to_roi_display(start, roi, render)
+            bx, by = full_to_roi_display(end, roi, render)
             cv2.line(canvas, (ax, ay), (bx, by), color, 2, cv2.LINE_AA)
 
         click_xy = full_to_roi_display(pending.click, roi, render)
