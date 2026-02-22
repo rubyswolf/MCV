@@ -26,6 +26,18 @@ class PendingSelection:
     lines: List[LineCandidate]
 
 
+CHANNEL_MODE_LABELS = {
+    "g": "gray",
+    "a": "avg",
+    "z": "red",
+    "x": "green",
+    "c": "blue",
+    "s": "red-green",
+    "d": "blue-yellow",
+    "f": "saturation",
+}
+
+
 def normalize_angle_degrees(angle: float) -> float:
     while angle <= -90.0:
         angle += 180.0
@@ -117,6 +129,37 @@ def refine_subpixel(gray: np.ndarray, point: np.ndarray, max_shift: float = 20.0
     if float(np.linalg.norm(refined - point.astype(np.float64))) > max_shift:
         return point.astype(np.float64)
     return refined
+
+
+def normalize_to_u8(image: np.ndarray) -> np.ndarray:
+    out = np.zeros_like(image, dtype=np.float32)
+    cv2.normalize(image, out, 0, 255, cv2.NORM_MINMAX)
+    return out.astype(np.uint8)
+
+
+def channel_from_mode(image_bgr: np.ndarray, mode: str) -> np.ndarray:
+    b, g, r = cv2.split(image_bgr)
+
+    if mode == "a":
+        avg = (r.astype(np.float32) + g.astype(np.float32) + b.astype(np.float32)) / 3.0
+        return np.clip(avg, 0, 255).astype(np.uint8)
+    if mode == "z":
+        return r
+    if mode == "x":
+        return g
+    if mode == "c":
+        return b
+    if mode == "s":
+        return normalize_to_u8(np.abs(r.astype(np.float32) - g.astype(np.float32)))
+    if mode == "d":
+        by = (0.5 * (r.astype(np.float32) + g.astype(np.float32))) - b.astype(np.float32)
+        return normalize_to_u8(np.abs(by))
+    if mode == "f":
+        hsv = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2HSV)
+        return hsv[:, :, 1]
+
+    # Default regular grayscale.
+    return cv2.cvtColor(image_bgr, cv2.COLOR_BGR2GRAY)
 
 
 def build_line_candidates(
@@ -361,9 +404,12 @@ def draw_ui(
     confirmed_points: List[np.ndarray],
     roi: tuple[int, int, int, int] | None,
     roi_scale: float,
+    channel_mode: str,
     drag_start: tuple[int, int] | None,
     drag_current: tuple[int, int] | None,
 ) -> tuple[np.ndarray, dict[str, float] | None]:
+    mode_label = CHANNEL_MODE_LABELS.get(channel_mode, "gray")
+
     if roi is None:
         canvas = base.copy()
 
@@ -375,13 +421,18 @@ def draw_ui(
             x1, y1 = drag_current
             cv2.rectangle(canvas, (x0, y0), (x1, y1), (0, 255, 0), 2, cv2.LINE_AA)
 
-        text = "Full view: drag LMB to select ROI | Esc=reset | q=quit"
+        text = "Full view: drag LMB=ROI | Esc=reset | q=quit"
         cv2.putText(canvas, text, (10, 24), cv2.FONT_HERSHEY_SIMPLEX, 0.58, (230, 230, 230), 2, cv2.LINE_AA)
         cv2.putText(canvas, text, (10, 24), cv2.FONT_HERSHEY_SIMPLEX, 0.58, (30, 30, 30), 1, cv2.LINE_AA)
+        text2 = "Modes: g=gray a=avg z=R x=G c=B s=R-G d=B-Y f=sat"
+        cv2.putText(canvas, text2, (10, 48), cv2.FONT_HERSHEY_SIMPLEX, 0.50, (230, 230, 230), 2, cv2.LINE_AA)
+        cv2.putText(canvas, text2, (10, 48), cv2.FONT_HERSHEY_SIMPLEX, 0.50, (30, 30, 30), 1, cv2.LINE_AA)
         return canvas, None
 
     x0, y0, x1, y1 = roi
-    crop = base[y0:y1, x0:x1].copy()
+    crop_bgr = base[y0:y1, x0:x1].copy()
+    crop_channel = channel_from_mode(crop_bgr, channel_mode)
+    crop = cv2.cvtColor(crop_channel, cv2.COLOR_GRAY2BGR)
     render = make_roi_render(roi, roi_scale)
     disp_w = int(render["disp_w"])
     disp_h = int(render["disp_h"])
@@ -421,9 +472,12 @@ def draw_ui(
         click_xy = full_to_roi_display(pending.click, roi, render)
         cv2.circle(canvas, click_xy, 4, (0, 255, 0), -1, cv2.LINE_AA)
 
-    text = "ROI view: LMB=2 lines | Space=confirm | Esc=full view | q=quit"
+    text = f"ROI view ({mode_label}): LMB=2 lines | Space=confirm | Esc=full view | q=quit"
     cv2.putText(canvas, text, (10, 24), cv2.FONT_HERSHEY_SIMPLEX, 0.54, (230, 230, 230), 2, cv2.LINE_AA)
     cv2.putText(canvas, text, (10, 24), cv2.FONT_HERSHEY_SIMPLEX, 0.54, (30, 30, 30), 1, cv2.LINE_AA)
+    text2 = "Modes: g=gray a=avg z=R x=G c=B s=R-G d=B-Y f=sat"
+    cv2.putText(canvas, text2, (10, 46), cv2.FONT_HERSHEY_SIMPLEX, 0.46, (230, 230, 230), 2, cv2.LINE_AA)
+    cv2.putText(canvas, text2, (10, 46), cv2.FONT_HERSHEY_SIMPLEX, 0.46, (30, 30, 30), 1, cv2.LINE_AA)
     return canvas, render
 
 def main() -> None:
@@ -444,6 +498,7 @@ def main() -> None:
         "roi": None,
         "roi_scale": 1.0,
         "roi_render": None,
+        "channel_mode": "a",
         "drag_start": None,
         "drag_current": None,
     }
@@ -464,21 +519,27 @@ def main() -> None:
             return
 
         x0, y0, x1, y1 = roi
-        roi_gray = gray[y0:y1, x0:x1]
-        if roi_gray.size == 0:
+        roi_bgr = image[y0:y1, x0:x1]
+        if roi_bgr.size == 0:
+            state["pending"] = PendingSelection(click=click_full, mode=mode, lines=[])
+            return
+
+        roi_channel = channel_from_mode(roi_bgr, str(state["channel_mode"]))
+        if roi_channel.size == 0:
             state["pending"] = PendingSelection(click=click_full, mode=mode, lines=[])
             return
 
         click_local = np.array([float(full_x - x0), float(full_y - y0)], dtype=np.float64)
 
-        length_thr = max(6.0, 0.02 * float(min(roi_gray.shape[0], roi_gray.shape[1])))
+        length_thr = max(6.0, 0.02 * float(min(roi_channel.shape[0], roi_channel.shape[1])))
         fld = cv2.ximgproc.createFastLineDetector(length_threshold=int(round(length_thr)), do_merge=True)
-        raw = fld.detect(roi_gray)
+        # Original behavior: detect line segments directly on the selected single-channel image.
+        raw = fld.detect(roi_channel)
         if raw is None or len(raw) == 0:
             state["pending"] = PendingSelection(click=click_full, mode=mode, lines=[])
             return
 
-        local_candidates = build_line_candidates(raw, click_local, roi_gray.shape[:2], needed_count=mode)
+        local_candidates = build_line_candidates(raw, click_local, roi_channel.shape[:2], needed_count=mode)
         if not local_candidates:
             state["pending"] = PendingSelection(click=click_full, mode=mode, lines=[])
             return
@@ -498,7 +559,7 @@ def main() -> None:
                 )
             )
 
-        selected = select_diverse_lines(full_candidates, mode, roi_gray.shape[:2])
+        selected = select_diverse_lines(full_candidates, mode, roi_channel.shape[:2])
         state["pending"] = PendingSelection(
             click=click_full,
             mode=mode,
@@ -556,6 +617,7 @@ def main() -> None:
             confirmed_points=state["confirmed"],
             roi=state["roi"],
             roi_scale=float(state["roi_scale"]),
+            channel_mode=str(state["channel_mode"]),
             drag_start=state["drag_start"],
             drag_current=state["drag_current"],
         )
@@ -565,6 +627,16 @@ def main() -> None:
         key = cv2.waitKey(20) & 0xFF
         if key == ord("q"):
             break
+
+        if key in (ord("g"), ord("a"), ord("z"), ord("x"), ord("c"), ord("s"), ord("d"), ord("f")):
+            state["channel_mode"] = chr(key)
+            # If a click is already pending, immediately recompute lines in the new mode.
+            pending = state["pending"]
+            if pending is not None and state["roi"] is not None:
+                px = int(round(float(pending.click[0])))
+                py = int(round(float(pending.click[1])))
+                start_line_selection(px, py, mode=int(pending.mode))
+            continue
 
         if key == 27:  # Esc: always return to full view.
             reset_to_full_view()
