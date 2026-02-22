@@ -53,36 +53,143 @@ def line_intersection(a1: np.ndarray, a2: np.ndarray, b1: np.ndarray, b2: np.nda
     return a1 + (r * float(t))
 
 
-def extract_cube_hexagon(scene_bgr: np.ndarray) -> np.ndarray:
-    if scene_bgr.ndim != 3 or scene_bgr.shape[2] < 3:
-        raise ValueError("Expected a BGR image.")
+def edge_median(points: np.ndarray) -> float:
+    pts = np.asarray(points, dtype=np.float32)
+    lengths = [float(np.linalg.norm(pts[(i + 1) % len(pts)] - pts[i])) for i in range(len(pts))]
+    if not lengths:
+        return 1.0
+    return float(np.median(np.array(lengths, dtype=np.float32)))
 
-    fg_mask = (scene_bgr[:, :, :3].sum(axis=2) > 0).astype(np.uint8) * 255
-    fg_mask = cv2.morphologyEx(
-        fg_mask,
-        cv2.MORPH_CLOSE,
-        cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3)),
-    )
 
-    contours, _ = cv2.findContours(fg_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-    if not contours:
-        raise RuntimeError("No foreground contour found in cube image.")
-
-    contour = max(contours, key=cv2.contourArea)
+def contour_to_hexagon(contour: np.ndarray) -> np.ndarray | None:
     perimeter = cv2.arcLength(contour, True)
-
-    for epsilon_scale in (0.005, 0.01, 0.015, 0.02, 0.03):
+    for epsilon_scale in (0.003, 0.005, 0.0075, 0.01, 0.015, 0.02, 0.03, 0.04):
         approx = cv2.approxPolyDP(contour, epsilon_scale * perimeter, True)
         if len(approx) == 6:
-            return approx.reshape(-1, 2).astype(np.float32)
+            pts = approx.reshape(-1, 2).astype(np.float32)
+            if cv2.isContourConvex(pts.reshape(-1, 1, 2).astype(np.int32)):
+                return pts
 
     hull = cv2.convexHull(contour)
     hull_perimeter = cv2.arcLength(hull, True)
-    approx_hull = cv2.approxPolyDP(hull, 0.02 * hull_perimeter, True)
-    if len(approx_hull) == 6:
-        return approx_hull.reshape(-1, 2).astype(np.float32)
+    for epsilon_scale in (0.003, 0.005, 0.0075, 0.01, 0.015, 0.02, 0.03):
+        approx_hull = cv2.approxPolyDP(hull, epsilon_scale * hull_perimeter, True)
+        if len(approx_hull) == 6:
+            pts = approx_hull.reshape(-1, 2).astype(np.float32)
+            if cv2.isContourConvex(pts.reshape(-1, 1, 2).astype(np.int32)):
+                return pts
+    return None
 
-    raise RuntimeError("Could not extract a 6-point cube silhouette.")
+
+def score_hexagon(hexagon: np.ndarray, image_shape: tuple[int, int, int]) -> float:
+    img_h, img_w = image_shape[:2]
+    img_area = float(img_h * img_w)
+    contour = hexagon.reshape(-1, 1, 2).astype(np.float32)
+    area = float(cv2.contourArea(contour))
+    if area < 0.005 * img_area:
+        return -1.0
+
+    edges = [float(np.linalg.norm(hexagon[(i + 1) % 6] - hexagon[i])) for i in range(6)]
+    min_edge = min(edges)
+    max_edge = max(edges)
+    if min_edge < 1e-6:
+        return -1.0
+
+    regularity = min_edge / max_edge
+    return area * (0.65 + 0.35 * regularity)
+
+
+def extract_cube_hexagon_candidates(scene_bgr: np.ndarray) -> List[np.ndarray]:
+    if scene_bgr.ndim != 3 or scene_bgr.shape[2] < 3:
+        raise ValueError("Expected a BGR image.")
+
+    gray = cv2.cvtColor(scene_bgr, cv2.COLOR_BGR2GRAY)
+    img_h, img_w = gray.shape
+    min_dim = min(img_h, img_w)
+    morph_k = max(3, int(round(min_dim * 0.006)))
+    if morph_k % 2 == 0:
+        morph_k += 1
+    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (morph_k, morph_k))
+
+    masks: List[np.ndarray] = []
+
+    # Strategy 1: non-zero foreground (works well for transparent/black-bg renders).
+    fg_mask = (scene_bgr[:, :, :3].sum(axis=2) > 0).astype(np.uint8) * 255
+    masks.append(
+        cv2.morphologyEx(
+            fg_mask,
+            cv2.MORPH_CLOSE,
+            cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3)),
+        )
+    )
+
+    # Strategy 2: bright region masks (covers thumbnails with white halo/UI backdrops).
+    q90 = float(np.percentile(gray, 90))
+    base_thr = int(np.clip(q90, 150, 235))
+    for delta in (-20, -10, 0, 10):
+        thr = int(np.clip(base_thr + delta, 120, 245))
+        _, bright = cv2.threshold(gray, thr, 255, cv2.THRESH_BINARY)
+        bright = cv2.morphologyEx(bright, cv2.MORPH_CLOSE, kernel)
+        bright = cv2.morphologyEx(bright, cv2.MORPH_OPEN, kernel)
+        masks.append(bright)
+
+    # Strategy 3: edge closure fallback (when intensity segmentation is weak).
+    blur = cv2.GaussianBlur(gray, (5, 5), 0)
+    edges = cv2.Canny(blur, 60, 180)
+    edge_k = max(3, int(round(min_dim * 0.01)))
+    if edge_k % 2 == 0:
+        edge_k += 1
+    edge_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (edge_k, edge_k))
+    closed = cv2.dilate(edges, edge_kernel, iterations=1)
+    closed = cv2.morphologyEx(closed, cv2.MORPH_CLOSE, edge_kernel)
+    masks.append(closed)
+
+    scored_hexagons: List[tuple[float, np.ndarray]] = []
+
+    for mask in masks:
+        contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        if not contours:
+            continue
+
+        contours = sorted(contours, key=cv2.contourArea, reverse=True)[:40]
+        for contour in contours:
+            if cv2.contourArea(contour) < 0.003 * float(img_h * img_w):
+                continue
+            hexagon = contour_to_hexagon(contour)
+            if hexagon is None:
+                continue
+            score = score_hexagon(hexagon, scene_bgr.shape)
+            if score <= 0:
+                continue
+            scored_hexagons.append((score, hexagon))
+
+    if not scored_hexagons:
+        return []
+
+    scored_hexagons.sort(key=lambda item: item[0], reverse=True)
+
+    # De-duplicate very similar candidates from multiple mask strategies.
+    deduped: List[np.ndarray] = []
+    seen_centers: List[np.ndarray] = []
+    seen_scales: List[float] = []
+    for _, hexagon in scored_hexagons:
+        center = hexagon.mean(axis=0)
+        scale = edge_median(hexagon)
+        is_duplicate = False
+        for prev_center, prev_scale in zip(seen_centers, seen_scales):
+            center_dist = float(np.linalg.norm(center - prev_center))
+            scale_delta = abs(scale - prev_scale) / max(prev_scale, 1e-6)
+            if center_dist <= 0.08 * max(scale, prev_scale) and scale_delta <= 0.20:
+                is_duplicate = True
+                break
+        if not is_duplicate:
+            deduped.append(hexagon)
+            seen_centers.append(center)
+            seen_scales.append(scale)
+        if len(deduped) >= 20:
+            break
+
+    return deduped
 
 
 def label_hexagon_vertices(hex_pts: np.ndarray) -> dict[str, np.ndarray]:
@@ -121,12 +228,14 @@ def label_hexagon_vertices(hex_pts: np.ndarray) -> dict[str, np.ndarray]:
 def refine_front_top_with_contrib(
     scene_gray: np.ndarray,
     initial_front_top: np.ndarray,
+    silhouette_scale: float,
 ) -> np.ndarray:
     fld = cv2.ximgproc.createFastLineDetector(length_threshold=25, do_merge=True)
     lines = fld.detect(scene_gray)
     if lines is None or len(lines) == 0:
         return initial_front_top
 
+    min_line_length = max(10.0, 0.35 * silhouette_scale)
     best_pos: tuple[float, tuple[np.ndarray, np.ndarray]] | None = None
     best_neg: tuple[float, tuple[np.ndarray, np.ndarray]] | None = None
 
@@ -134,7 +243,7 @@ def refine_front_top_with_contrib(
         a = np.array([raw_line[0], raw_line[1]], dtype=np.float32)
         b = np.array([raw_line[2], raw_line[3]], dtype=np.float32)
         length = float(np.linalg.norm(b - a))
-        if length < 50.0:
+        if length < min_line_length:
             continue
 
         angle = math.degrees(math.atan2(float(b[1] - a[1]), float(b[0] - a[0])))
@@ -159,7 +268,7 @@ def refine_front_top_with_contrib(
     if intersect is None:
         return initial_front_top
 
-    if float(np.linalg.norm(intersect - initial_front_top)) <= 30.0:
+    if float(np.linalg.norm(intersect - initial_front_top)) <= 0.60 * silhouette_scale:
         return intersect.astype(np.float32)
     return initial_front_top
 
@@ -187,36 +296,73 @@ def face_match_score(face_patch: np.ndarray, template_variants: Iterable[np.ndar
 def detect_faces(template_gray: np.ndarray, scene_bgr: np.ndarray) -> List[np.ndarray]:
     scene_gray = cv2.cvtColor(scene_bgr, cv2.COLOR_BGR2GRAY)
 
-    hexagon = extract_cube_hexagon(scene_bgr)
-    labels = label_hexagon_vertices(hexagon)
-
-    vertical_left = labels["left_lower"] - labels["left_upper"]
-    vertical_right = labels["right_lower"] - labels["right_upper"]
-    vertical_avg = (vertical_left + vertical_right) * 0.5
-
-    initial_front_top = labels["bottom"] - vertical_avg
-    front_top = refine_front_top_with_contrib(scene_gray, initial_front_top)
-
-    candidate_faces = [
-        np.array([labels["left_upper"], labels["top"], labels["right_upper"], front_top], dtype=np.float32),
-        np.array([labels["left_upper"], front_top, labels["bottom"], labels["left_lower"]], dtype=np.float32),
-        np.array([front_top, labels["right_upper"], labels["right_lower"], labels["bottom"]], dtype=np.float32),
-    ]
-
     h_t, w_t = template_gray.shape[:2]
     dst_square = np.array([[0, 0], [w_t - 1, 0], [w_t - 1, h_t - 1], [0, h_t - 1]], dtype=np.float32)
     template_variants = rotate_template_variants(template_gray)
 
+    hexagon_candidates = extract_cube_hexagon_candidates(scene_bgr)
+    if not hexagon_candidates:
+        raise RuntimeError("Could not extract a 6-point cube silhouette.")
+
+    best_faces: List[np.ndarray] = []
+    best_scores: List[float] = []
+    best_metric = -1.0
+    image_area = float(scene_bgr.shape[0] * scene_bgr.shape[1])
+
+    for hexagon in hexagon_candidates:
+        labels = label_hexagon_vertices(hexagon)
+
+        vertical_left = labels["left_lower"] - labels["left_upper"]
+        vertical_right = labels["right_lower"] - labels["right_upper"]
+        vertical_avg = (vertical_left + vertical_right) * 0.5
+        silhouette_scale = edge_median(hexagon)
+
+        initial_front_top = labels["bottom"] - vertical_avg
+        front_top = refine_front_top_with_contrib(scene_gray, initial_front_top, silhouette_scale)
+
+        candidate_faces = [
+            np.array([labels["left_upper"], labels["top"], labels["right_upper"], front_top], dtype=np.float32),
+            np.array([labels["left_upper"], front_top, labels["bottom"], labels["left_lower"]], dtype=np.float32),
+            np.array([front_top, labels["right_upper"], labels["right_lower"], labels["bottom"]], dtype=np.float32),
+        ]
+
+        scores: List[float] = []
+        for quad in candidate_faces:
+            transform = cv2.getPerspectiveTransform(quad, dst_square)
+            patch = cv2.warpPerspective(scene_gray, transform, (w_t, h_t), flags=cv2.INTER_LINEAR)
+            scores.append(face_match_score(patch, template_variants))
+
+        # Prefer candidates where all faces are template-consistent, with a scale-relative size prior.
+        base_metric = float(np.mean(scores) + 0.8 * np.min(np.array(scores, dtype=np.float32)))
+        area = float(cv2.contourArea(hexagon.reshape(-1, 1, 2).astype(np.float32)))
+        area_ratio = max(area / max(image_area, 1.0), 1e-6)
+        size_weight = 1.0 + 0.75 * math.log1p(80.0 * area_ratio)
+        metric = base_metric * size_weight
+        if metric > best_metric:
+            best_metric = metric
+            best_faces = [order_points_clockwise(quad) for quad in candidate_faces]
+            best_scores = scores
+
+    if not best_faces:
+        return []
+
+    max_score = float(max(best_scores))
+    mean_score = float(np.mean(np.array(best_scores, dtype=np.float32)))
+    min_score = float(min(best_scores))
+
+    # Dynamic acceptance tuned for scale/compression variation:
+    # - reject weak overall candidates,
+    # - keep all faces when candidate is coherent,
+    # - otherwise keep only stronger faces.
+    if max_score < 0.30 and mean_score < 0.22:
+        return []
+    if mean_score >= 0.22 and min_score >= 0.14:
+        return best_faces
+
     detections: List[np.ndarray] = []
-    min_score = 0.30
-
-    for quad in candidate_faces:
-        transform = cv2.getPerspectiveTransform(quad, dst_square)
-        patch = cv2.warpPerspective(scene_gray, transform, (w_t, h_t), flags=cv2.INTER_LINEAR)
-        score = face_match_score(patch, template_variants)
-
-        if score >= min_score:
-            detections.append(order_points_clockwise(quad))
+    for quad, score in zip(best_faces, best_scores):
+        if score >= 0.24:
+            detections.append(quad)
 
     return detections
 
@@ -314,6 +460,145 @@ def fit_line_from_points(points: np.ndarray) -> tuple[np.ndarray, np.ndarray] | 
     direction /= norm
     point = np.array([x0, y0], dtype=np.float64)
     return point, direction
+
+
+def normalize_line_angle_degrees(a: np.ndarray, b: np.ndarray) -> float:
+    angle = math.degrees(math.atan2(float(b[1] - a[1]), float(b[0] - a[0])))
+    if angle < -90.0:
+        angle += 180.0
+    if angle > 90.0:
+        angle -= 180.0
+    return angle
+
+
+def intersect_lines_parametric(a1: np.ndarray, a2: np.ndarray, b1: np.ndarray, b2: np.ndarray) -> np.ndarray | None:
+    matrix = np.array(
+        [
+            [float(a2[0] - a1[0]), float(b1[0] - b2[0])],
+            [float(a2[1] - a1[1]), float(b1[1] - b2[1])],
+        ],
+        dtype=np.float64,
+    )
+    det = float(np.linalg.det(matrix))
+    if abs(det) < 1e-8:
+        return None
+    rhs = np.array([float(b1[0] - a1[0]), float(b1[1] - a1[1])], dtype=np.float64)
+    t, _ = np.linalg.solve(matrix, rhs)
+    return a1.astype(np.float64) + (a2.astype(np.float64) - a1.astype(np.float64)) * float(t)
+
+
+def refine_corner_with_contrib_lines(
+    scene_gray: np.ndarray,
+    detections: List[np.ndarray],
+    coarse_corner: np.ndarray,
+) -> np.ndarray:
+    if len(detections) < 2:
+        return coarse_corner
+
+    if not hasattr(cv2, "ximgproc"):
+        return coarse_corner
+
+    scale = infer_detection_scale(detections)
+    min_line_length = max(12.0, 0.30 * scale)
+
+    left_anchor = None
+    right_anchor = None
+    coarse_y = float(coarse_corner[1])
+
+    top_neighbor_candidates: List[np.ndarray] = []
+    for quad in detections:
+        dists = [float(np.linalg.norm(pt.astype(np.float64) - coarse_corner.astype(np.float64))) for pt in quad]
+        corner_idx = int(np.argmin(np.array(dists, dtype=np.float64)))
+        prev_idx = (corner_idx - 1) % 4
+        next_idx = (corner_idx + 1) % 4
+        top_neighbor_candidates.append(quad[prev_idx].astype(np.float64))
+        top_neighbor_candidates.append(quad[next_idx].astype(np.float64))
+
+    top_neighbors = [
+        point for point in top_neighbor_candidates if float(point[1]) <= coarse_y + 0.20 * scale
+    ]
+    if len(top_neighbors) < 2:
+        return coarse_corner
+
+    left_anchor = min(top_neighbors, key=lambda point: float(point[0]))
+    right_anchor = max(top_neighbors, key=lambda point: float(point[0]))
+
+    if left_anchor is None or right_anchor is None:
+        return coarse_corner
+
+    expected_center_x = 0.5 * float(left_anchor[0] + right_anchor[0])
+
+    fld = cv2.ximgproc.createFastLineDetector(length_threshold=25, do_merge=True)
+    lines = fld.detect(scene_gray)
+    if lines is None or len(lines) == 0:
+        return coarse_corner
+
+    vertical_candidate = None
+    for raw_line in lines[:, 0, :]:
+        a = np.array([raw_line[0], raw_line[1]], dtype=np.float64)
+        b = np.array([raw_line[2], raw_line[3]], dtype=np.float64)
+        length = float(np.linalg.norm(b - a))
+        if length < min_line_length:
+            continue
+        min_y = float(min(a[1], b[1]))
+        max_y = float(max(a[1], b[1]))
+        if min_y > coarse_y + 0.20 * scale:
+            continue
+        if max_y < coarse_y - 0.20 * scale:
+            continue
+        angle = normalize_line_angle_degrees(a, b)
+        if abs(abs(angle) - 90.0) > 12.0:
+            continue
+        x_mid = 0.5 * float(a[0] + b[0])
+        y_mid = 0.5 * float(a[1] + b[1])
+        score = abs(x_mid - expected_center_x) + 0.02 * abs(y_mid - coarse_y)
+        if vertical_candidate is None or score < vertical_candidate[0]:
+            vertical_candidate = (score, a, b, x_mid)
+
+    if vertical_candidate is None:
+        return coarse_corner
+
+    _, vert_a, vert_b, vert_x = vertical_candidate
+
+    positive_candidate = None
+    for raw_line in lines[:, 0, :]:
+        a = np.array([raw_line[0], raw_line[1]], dtype=np.float64)
+        b = np.array([raw_line[2], raw_line[3]], dtype=np.float64)
+        if a[0] > b[0]:
+            a, b = b, a
+        length = float(np.linalg.norm(b - a))
+        if length < min_line_length:
+            continue
+        angle = normalize_line_angle_degrees(a, b)
+        if not (15.0 <= angle <= 45.0):
+            continue
+        if point_to_line_distance(left_anchor.astype(np.float32), a.astype(np.float32), b.astype(np.float32)) > 0.12 * scale:
+            continue
+
+        inter = intersect_lines_parametric(a, b, vert_a, vert_b)
+        if inter is None:
+            continue
+        if inter[1] < -0.2 * scale or inter[1] > scene_gray.shape[0] + 0.2 * scale:
+            continue
+
+        score = 1.5 * abs(float(inter[1]) - coarse_y) + 2.0 * abs(float(inter[0]) - vert_x)
+        score += 0.02 * abs(length - scale)
+        if positive_candidate is None or score < positive_candidate[0]:
+            positive_candidate = (score, inter)
+
+    if positive_candidate is None:
+        return coarse_corner
+
+    refined = positive_candidate[1]
+    if float(np.linalg.norm(refined - coarse_corner.astype(np.float64))) > 0.15 * scale:
+        return coarse_corner
+
+    coarse_center_error = abs(float(coarse_corner[0]) - expected_center_x)
+    refined_center_error = abs(float(refined[0]) - expected_center_x)
+    if refined_center_error > coarse_center_error + 0.02 * scale:
+        return coarse_corner
+
+    return refined.astype(np.float64)
 
 
 def least_squares_intersection(lines: List[tuple[np.ndarray, np.ndarray]]) -> np.ndarray | None:
@@ -484,7 +769,7 @@ def main() -> None:
             "Find repeated appearances of texture.png in cube.png and output transparent quadrilateral overlay."
         )
     )
-    parser.add_argument("--template", type=Path, default=Path("andesite.png"))
+    parser.add_argument("--template", type=Path, default=Path("polished_andesite.png"))
     parser.add_argument("--scene", type=Path, default=Path("cube.png"))
     parser.add_argument("--output", type=Path, default=Path("detection.png"))
     args = parser.parse_args()
@@ -514,6 +799,8 @@ def main() -> None:
 
     corner = estimate_corner_from_faces(detections)
     if corner is not None:
+        scene_gray = cv2.cvtColor(scene_bgr, cv2.COLOR_BGR2GRAY)
+        corner = refine_corner_with_contrib_lines(scene_gray, detections, corner)
         print(f"Corner: ({corner[0]:.3f}, {corner[1]:.3f})")
     else:
         print("Corner: not found (faces did not form a scale-consistent trihedral corner).")
