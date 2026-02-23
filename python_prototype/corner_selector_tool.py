@@ -642,8 +642,8 @@ def main() -> None:
         raise RuntimeError("OpenCV contrib is required (cv2.ximgproc missing).")
 
     base_dir = Path(__file__).resolve().parent
-    known_points_path = base_dir / "known_points.csv"
-    image_path = "known.png"
+    known_points_path = base_dir / "points.csv"
+    image_path = "../examples/images/corners.png"
     image = cv2.imread(str(image_path), cv2.IMREAD_COLOR)
     if image is None:
         raise FileNotFoundError(f"Failed to load image: {image_path}")

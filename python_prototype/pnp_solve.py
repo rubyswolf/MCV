@@ -174,8 +174,8 @@ def rmse_px(
 
 def main() -> None:
     base_dir = Path(__file__).resolve().parent
-    csv_path = base_dir / "known_points.csv"
-    image_path = base_dir / "known.png"
+    csv_path = base_dir / "../examples/labeled/1/points.csv"
+    image_path = base_dir / "../examples/labeled/1/original_image.png"
 
     image = cv2.imread(str(image_path), cv2.IMREAD_COLOR)
     if image is None:
@@ -245,7 +245,6 @@ def main() -> None:
     print(f"Reprojection RMSE: {rmse:.6f} px")
     print()
     print(f"Predicted position: {cam_world[0]:.12f}, {cam_world[1]:.12f}, {cam_world[2]:.12f}")
-    print(f"Predicted rotation (pitch, yaw): {pitch_deg:.7f}, {yaw_deg:.7f}")
     print(f"Predicted rotation (yaw, pitch): {yaw_deg:.7f}, {pitch_deg:.7f}")
     print()
     print(f"Ground truth position: {gt_pos[0]:.12f}, {gt_pos[1]:.12f}, {gt_pos[2]:.12f}")
@@ -253,9 +252,6 @@ def main() -> None:
     print()
     print(f"Position error distance: {pos_err:.12f} blocks")
     print(f"Rotation error distance: {rot_combined_err:.12f} deg")
-    print(f"Pitch error: {pitch_err:.12f} deg")
-    print(f"Yaw error: {yaw_err:.12f} deg")
-
 
 if __name__ == "__main__":
     main()

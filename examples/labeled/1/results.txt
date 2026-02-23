@@ -1,0 +1,8 @@
+Optimized focal: 528.473559 px
+Optimized FOV: h=107.443328 deg, v=76.751644 deg
+
+Predicted position: 24.115220913157, 33.721398745033, 254.016330783291
+Predicted rotation (yaw, pitch): 3.2763167, 44.6224401
+
+Position error distance: 0.042043148290 blocks
+Rotation error distance: 0.187458190731 deg
