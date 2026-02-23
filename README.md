@@ -1,6 +1,6 @@
 # What does MCV do?
 
-Minecraft Computer Vision (MCV) is a tool for recreating Minecraft player poses based on images/video. It allows you to label points on a Minecraft world image and where those points lie ingame then use the data to solve the PnP problem, which is the problem of estimating the camera pose and focal length from 2D-3D correspondences. This tool was created to assist in collecting evidence for the Dream MCC 11 Parkour cheating contraversy but it can be used for many other applications, for both of these reasons it is open source and free to use for anyone.
+Minecraft Computer Vision (MCV) is a tool for recreating Minecraft player poses based on images/video. It allows you to label points on a Minecraft world image with edge detection assistance and where those points lie ingame then use the data to solve the PnP problem, which is the problem of estimating the camera pose and focal length from 2D-3D correspondences. This tool was created to assist in collecting evidence for the Dream MCC 11 Parkour cheating contraversy but it can be used for many other applications, for both of these reasons it is open source and free to use for anyone.
 
 # Applications
 

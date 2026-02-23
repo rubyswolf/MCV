@@ -8,7 +8,7 @@ import cv2
 import numpy as np
 
 BASE_DIR = Path(__file__).resolve().parent
-TARGET_IMAGE_PATH = BASE_DIR / "../examples/images/corners.png"
+TARGET_IMAGE_PATH = BASE_DIR / "../examples/images/frame1.png"
 
 
 @dataclass
@@ -641,8 +641,8 @@ def append_known_point(csv_path: Path, screen_xy: np.ndarray, world_xyz: tuple[i
 
 
 def main() -> None:
-    if not hasattr(cv2, "ximgproc"):
-        raise RuntimeError("OpenCV contrib is required (cv2.ximgproc missing).")
+    if not hasattr(cv2, "createLineSegmentDetector"):
+        raise RuntimeError("LineSegmentDetector is unavailable in this OpenCV build.")
 
     known_points_path = BASE_DIR / "points.csv"
     image = cv2.imread(str(TARGET_IMAGE_PATH), cv2.IMREAD_COLOR)
@@ -704,8 +704,15 @@ def main() -> None:
             return
 
         length_thr = max(6.0, 0.02 * float(min(roi_channel.shape[0], roi_channel.shape[1])))
-        fld = cv2.ximgproc.createFastLineDetector(length_threshold=int(round(length_thr)), do_merge=True)
-        raw = fld.detect(roi_channel)
+        lsd = cv2.createLineSegmentDetector(cv2.LSD_REFINE_STD)
+        detect_result = lsd.detect(roi_channel)
+
+        if detect_result is None:
+            raw = None
+        elif isinstance(detect_result, (tuple, list)):
+            raw = detect_result[0]
+        else:
+            raw = detect_result
 
         if raw is None or len(raw) == 0:
             state["cached_raw_lines"] = np.empty((0, 1, 4), dtype=np.float32)
@@ -713,7 +720,22 @@ def main() -> None:
             state["cached_lines_full"] = []
             return
 
-        fused_raw = fuse_line_segments(raw, roi_channel.shape[:2])
+        # Keep behavior close to prior FLD setup by enforcing a minimum segment length.
+        kept: List[np.ndarray] = []
+        for seg in raw[:, 0, :]:
+            a = np.array([float(seg[0]), float(seg[1])], dtype=np.float64)
+            b = np.array([float(seg[2]), float(seg[3])], dtype=np.float64)
+            if float(np.linalg.norm(b - a)) >= length_thr:
+                kept.append(np.array([a[0], a[1], b[0], b[1]], dtype=np.float32))
+
+        if len(kept) == 0:
+            state["cached_raw_lines"] = np.empty((0, 1, 4), dtype=np.float32)
+            state["cached_roi_shape"] = roi_channel.shape[:2]
+            state["cached_lines_full"] = []
+            return
+
+        raw_filtered = np.array(kept, dtype=np.float32).reshape(-1, 1, 4)
+        fused_raw = fuse_line_segments(raw_filtered, roi_channel.shape[:2])
 
         offset = np.array([float(x0), float(y0)], dtype=np.float64)
         lines_full: List[tuple[np.ndarray, np.ndarray]] = []
