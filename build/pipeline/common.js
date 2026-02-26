@@ -18,6 +18,10 @@ async function buildCommonArtifacts() {
     typeof options.opencvUrl === "string" && options.opencvUrl.trim()
       ? options.opencvUrl
       : "/opencv.js";
+  const videoApiUrl =
+    typeof options.videoApiUrl === "string" && options.videoApiUrl.trim()
+      ? options.videoApiUrl
+      : "/mcv/videos";
 
   await ensureDir(DIST_COMMON_DIR);
 
@@ -39,6 +43,7 @@ async function buildCommonArtifacts() {
     define: {
       __MCV_BACKEND__: JSON.stringify(backendMode),
       __MCV_OPENCV_URL__: JSON.stringify(opencvUrl),
+      __MCV_VIDEO_API_URL__: JSON.stringify(videoApiUrl),
     },
   });
 
@@ -67,26 +72,43 @@ async function buildCommonArtifacts() {
   };
 }
 
-function renderPythonStandaloneScript(inlineHtml) {
+function renderPythonStandaloneScript(inlineHtml, requirementsText) {
   const htmlAsPythonString = JSON.stringify(inlineHtml);
+  const requirementsAsPythonString = JSON.stringify(requirementsText);
   return `#!/usr/bin/env python3
 import sys
+from pathlib import Path
+
+REQUIREMENTS_FILENAME = "mcv-requirements.txt"
+REQUIREMENTS_TEXT = ${requirementsAsPythonString}
+
+
+def write_requirements_file():
+    output_path = Path.cwd() / REQUIREMENTS_FILENAME
+    try:
+        output_path.write_text(REQUIREMENTS_TEXT, encoding="utf-8")
+        print(f"Wrote requirements file: {output_path}")
+    except Exception as exc:
+        print(f"Failed to write {REQUIREMENTS_FILENAME}: {exc}")
+    return output_path
 
 try:
     from flask import Flask, Response, jsonify, request
 except ImportError as exc:
+    requirements_path = write_requirements_file()
     print(f"Missing dependency: {exc.name}")
     print("Install requirements with:")
-    print(f"  {sys.executable} -m pip install -r requirements-python-standalone.txt")
+    print(f"  {sys.executable} -m pip install -r {requirements_path}")
     raise SystemExit(1)
 
 try:
     import cv2
     import numpy as np
 except ImportError as exc:
+    requirements_path = write_requirements_file()
     print(f"Missing dependency: {exc.name}")
     print("Install requirements with:")
-    print(f"  {sys.executable} -m pip install -r requirements-python-standalone.txt")
+    print(f"  {sys.executable} -m pip install -r {requirements_path}")
     raise SystemExit(1)
 
 HTML_PAGE = ${htmlAsPythonString}

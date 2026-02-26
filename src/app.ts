@@ -30,6 +30,7 @@ type McvOpencvTestResult = {
 
 declare const __MCV_BACKEND__: "python" | "web";
 declare const __MCV_OPENCV_URL__: string;
+declare const __MCV_VIDEO_API_URL__: string;
 
 let cvPromise: Promise<unknown> | null = null;
 
@@ -189,7 +190,9 @@ async function checkHealth(): Promise<void> {
   if (__MCV_BACKEND__ === "web") {
     try {
       const cv = await getWebMcvRuntime();
-      setStatus(`Connected to web backend (opencv.js ${String((cv as any).VERSION ?? "ready")})`);
+      setStatus(
+        `Connected to web backend (opencv.js ${String((cv as any).VERSION ?? "ready")}, videos at ${__MCV_VIDEO_API_URL__})`
+      );
       return;
     } catch (error) {
       setStatus(`Web backend init failed: ${String(error)}`);
@@ -208,7 +211,9 @@ async function checkHealth(): Promise<void> {
       setStatus("Backend health check failed");
       return;
     }
-    setStatus(`Connected to backend (${payload.backend ?? "unknown"})`);
+    setStatus(
+      `Connected to backend (${payload.backend ?? "unknown"}, videos at ${__MCV_VIDEO_API_URL__})`
+    );
   } catch {
     setStatus("Could not connect to backend");
   }

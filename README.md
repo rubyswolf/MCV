@@ -30,9 +30,78 @@ In the future I hope to make an either server or client side tool that lets you 
   - /images: Some random images that can be used for testing the corner selector tool and edge detection.
 - /python_prototype: My first working prototype of the corner selector tool and PnP solver written in python using OpenCV.
 
+# Build
+
+Build uses Node + esbuild.
+
+Install dependencies:
+
+```bash
+npm install
+```
+
+Build targets:
+
+```bash
+npm run build:python
+npm run build:web
+```
+
+The python target is a standalone script hosting a flask server locally using the offical OpenCV python library.
+The web target is an embeddable React component that can be used in websites.
+The web target depends on OpenCV.js which is not bundled with the app, you need to build it yourself and host it on your website or use a CDN version.
+
+- `build:web` outputs:
+  - `dist/common/app.bundle.js`
+  - `dist/common/index.inline.html`
+  - `dist/web/index.html`
+  - `dist/web/MCV.tsx`
+- `build:python` outputs:
+  - `dist/common/app.bundle.js`
+  - `dist/common/index.inline.html`
+  - `dist/python/mcv_standalone.py`
+
+Web target config is in `build/web.target.config.json`:
+
+- `site_root`: root of your website project, all other paths are relative to this
+- `component_dest`: destination folder for `MCV.tsx`
+- `opencv_dest`: destination folder for `opencv.js`
+- `opencv_url`: runtime URL used by the app to load OpenCV.js (example: `/opencv.js`)
+- `video_api_url`: runtime URL for your video API endpoint (example: `/mcv/videos`)
+
+## Build OpenCV.js
+
+OpenCV.js is built with the helper script in `build/build_opencv_js_single.py`.
+
+Prereqs:
+
+- Emscripten SDK installed and activated
+- CMake
+- Ninja
+
+Typical Windows flow:
+
+```bat
+C:\dev\build\emsdk\emsdk_env.bat
+python build\build_opencv_js_single.py --run
+```
+
+Useful flags:
+
+- `--clean` to clean the OpenCV.js build dir
+- `--simd` / `--no-simd` to toggle WASM SIMD
+- `--cmake-option=...` to pass extra CMake options
+
+Expected output:
+
+- `build/opencv_js_mcv_single/bin/opencv.js`
+
+Whitelist used for exported JS bindings:
+
+- `build/opencv_js_mcv_whitelist.py`
+
 # Coming soon
 
-The final local version of the tool will be packaged into a single portable HTML file, that way you know it's safe to run, it can have a nicer interface and it's easy to share it with your friends without needing to install anything.
-I plan to host a version of the tool on my website https://dartjs.com specifically for collecting evidence for the Dream contraversy so that together we can crowdsource the data collection and publicly publish the data for anyone to analyse and I plan to analyse the data myself as well and publish the results and share it with youtubers to present the evidence in an easy to understand way.
+I plan to host a version of the tool on my website https://dartjs.com specifically for collecting evidence for the Dream controversy so that together we can crowdsource the data collection and publicly publish the data for anyone to analyse and I plan to analyse the data myself as well and publish the results and share it with youtubers to present the evidence in an easy to understand way.
 
 Let's find out whether or not he cheated together!

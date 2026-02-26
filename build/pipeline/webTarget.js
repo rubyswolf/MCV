@@ -130,16 +130,20 @@ async function syncWebConfigDestinations(webConfig, artifacts) {
 }
 
 async function buildWebTarget(options = {}) {
+  const webConfig = options.webConfig && typeof options.webConfig === "object" ? options.webConfig : {};
   const opencvUrl =
-    options.webConfig &&
-    typeof options.webConfig.opencv_url === "string" &&
-    options.webConfig.opencv_url.trim()
-      ? options.webConfig.opencv_url
+    typeof webConfig.opencv_url === "string" && webConfig.opencv_url.trim()
+      ? webConfig.opencv_url
       : "/opencv.js";
+  const videoApiUrl =
+    typeof webConfig.video_api_url === "string" && webConfig.video_api_url.trim()
+      ? webConfig.video_api_url
+      : "/mcv/videos";
 
   const commonArtifacts = await buildCommonArtifacts({
     backendMode: "web",
     opencvUrl,
+    videoApiUrl,
   });
   await ensureDir(DIST_WEB_DIR);
 
