@@ -1,0 +1,6 @@
+{
+  "site_root": "C:\\dev\\dartjs",
+  "component_dest": "\\components",
+  "opencv_dest": "\\public",
+  "opencv_url": "/opencv.js"
+}

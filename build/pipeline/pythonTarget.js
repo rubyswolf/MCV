@@ -10,10 +10,12 @@ const {
 const DIST_PYTHON_DIR = path.join(DIST_DIR, "python");
 
 async function buildPythonTarget() {
-  const commonArtifacts = await buildCommonArtifacts();
+  const commonArtifacts = await buildCommonArtifacts({
+    backendMode: "python",
+  });
   await ensureDir(DIST_PYTHON_DIR);
 
-  const standaloneScriptPath = path.join(DIST_PYTHON_DIR, "standalone_server.py");
+  const standaloneScriptPath = path.join(DIST_PYTHON_DIR, "mcv_standalone.py");
   const standaloneScript = renderPythonStandaloneScript(commonArtifacts.inlineHtml);
   await fs.writeFile(standaloneScriptPath, standaloneScript, "utf8");
 

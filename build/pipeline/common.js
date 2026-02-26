@@ -12,6 +12,13 @@ async function ensureDir(dirPath) {
 }
 
 async function buildCommonArtifacts() {
+  const options = arguments[0] || {};
+  const backendMode = options.backendMode === "web" ? "web" : "python";
+  const opencvUrl =
+    typeof options.opencvUrl === "string" && options.opencvUrl.trim()
+      ? options.opencvUrl
+      : "/opencv.js";
+
   await ensureDir(DIST_COMMON_DIR);
 
   const appEntry = path.join(SRC_DIR, "app.ts");
@@ -29,6 +36,10 @@ async function buildCommonArtifacts() {
     legalComments: "none",
     write: false,
     logLevel: "silent",
+    define: {
+      __MCV_BACKEND__: JSON.stringify(backendMode),
+      __MCV_OPENCV_URL__: JSON.stringify(opencvUrl),
+    },
   });
 
   const appBundle = result.outputFiles[0].text;
@@ -36,7 +47,13 @@ async function buildCommonArtifacts() {
 
   const template = await fs.readFile(htmlTemplatePath, "utf8");
   const safeInlineBundle = appBundle.replace(/<\/script/gi, "<\\/script");
-  const inlineHtml = template.replace("__APP_JS__", safeInlineBundle);
+  const backendScripts =
+    backendMode === "web"
+      ? `<script src="${opencvUrl.replace(/"/g, "&quot;")}"></script>`
+      : "";
+  const inlineHtml = template
+    .replace("__BACKEND_SCRIPTS__", backendScripts)
+    .replace("__APP_JS__", safeInlineBundle);
   await fs.writeFile(inlineHtmlPath, inlineHtml, "utf8");
 
   return {
@@ -77,7 +94,7 @@ HTML_PAGE = ${htmlAsPythonString}
 app = Flask(__name__)
 
 
-def handle_opencv_test(_args):
+def handle_mcv_cv_opencv_test(_args):
     rgb = np.array([[[255, 0, 0], [0, 255, 0], [0, 0, 255]]], dtype=np.uint8)
     gray = cv2.cvtColor(rgb, cv2.COLOR_RGB2GRAY)
     return {
@@ -88,8 +105,8 @@ def handle_opencv_test(_args):
     }
 
 
-@app.get("/api/health")
-def api_health():
+@app.get("/api/mcv/health")
+def api_mcv_health():
     return jsonify({
         "ok": True,
         "backend": "python-cv2",
@@ -97,14 +114,14 @@ def api_health():
     })
 
 
-@app.post("/api/cv")
-def api_cv():
+@app.post("/api/mcv")
+def api_mcv():
     payload = request.get_json(silent=True) or {}
     op = payload.get("op")
     args = payload.get("args") or {}
 
-    if op == "opencvTest":
-        return jsonify({"ok": True, "data": handle_opencv_test(args)})
+    if op == "cv.opencvTest":
+        return jsonify({"ok": True, "data": handle_mcv_cv_opencv_test(args)})
 
     return (
         jsonify(
