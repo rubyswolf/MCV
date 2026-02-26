@@ -91,6 +91,18 @@ function resolveConfiguredPath(baseRoot, configuredPath) {
   return path.resolve(baseRoot, normalizedRelative);
 }
 
+function resolveOpencvOutputFilename(opencvUrl) {
+  const rawValue = typeof opencvUrl === "string" && opencvUrl.trim() ? opencvUrl.trim() : "/opencv.js";
+  try {
+    const parsed = new URL(rawValue, "https://local.invalid");
+    const candidate = path.basename(parsed.pathname || "");
+    return candidate || "opencv.js";
+  } catch {
+    const candidate = path.basename(rawValue.split("?")[0].split("#")[0]);
+    return candidate || "opencv.js";
+  }
+}
+
 async function syncWebConfigDestinations(webConfig, artifacts) {
   const syncMap = new Map();
   const siteRoot =
@@ -113,9 +125,7 @@ async function syncWebConfigDestinations(webConfig, artifacts) {
       (typeof webConfig.opencv_source === "string" && webConfig.opencv_source.trim()
         ? path.resolve(webConfig.opencv_source)
         : path.join(ROOT_DIR, "build", "opencv_js_mcv_single", "bin", "opencv.js"));
-    const opencvFilename = path.basename(
-      (typeof webConfig.opencv_url === "string" && webConfig.opencv_url.trim()) || "/opencv.js"
-    );
+    const opencvFilename = resolveOpencvOutputFilename(webConfig.opencv_url);
     const destinationPath = path.join(opencvDest, opencvFilename || "opencv.js");
     await fs.copyFile(opencvSource, destinationPath);
     const existing = syncMap.get(opencvDest) || [];
@@ -131,13 +141,15 @@ async function syncWebConfigDestinations(webConfig, artifacts) {
 
 async function buildWebTarget(options = {}) {
   const webConfig = options.webConfig && typeof options.webConfig === "object" ? options.webConfig : {};
+  const commonConfig =
+    options.commonConfig && typeof options.commonConfig === "object" ? options.commonConfig : {};
   const opencvUrl =
     typeof webConfig.opencv_url === "string" && webConfig.opencv_url.trim()
       ? webConfig.opencv_url
       : "/opencv.js";
   const videoApiUrl =
-    typeof webConfig.video_api_url === "string" && webConfig.video_api_url.trim()
-      ? webConfig.video_api_url
+    typeof commonConfig.video_api_url === "string" && commonConfig.video_api_url.trim()
+      ? commonConfig.video_api_url
       : "/mcv/videos";
 
   const commonArtifacts = await buildCommonArtifacts({

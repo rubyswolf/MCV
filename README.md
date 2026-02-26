@@ -49,7 +49,7 @@ npm run build:web
 
 The python target is a standalone script hosting a flask server locally using the offical OpenCV python library.
 The web target is an embeddable React component that can be used in websites.
-The web target depends on OpenCV.js which is not bundled with the app, you need to build it yourself and host it on your website or use a CDN version.
+The web target depends on OpenCV.js which is not bundled with the app, you need to build it yourself using the provided `build_opencv_js_single.py` and host it on your website or use a CDN version.
 
 - `build:web` outputs:
   - `dist/common/app.bundle.js`
@@ -61,13 +61,23 @@ The web target depends on OpenCV.js which is not bundled with the app, you need 
   - `dist/common/index.inline.html`
   - `dist/python/mcv_standalone.py`
 
-Web target config is in `build/web.target.config.json`:
+Build config is in `build/config.json`:
 
-- `site_root`: root of your website project, all other paths are relative to this
-- `component_dest`: destination folder for `MCV.tsx`
-- `opencv_dest`: destination folder for `opencv.js`
-- `opencv_url`: runtime URL used by the app to load OpenCV.js (example: `/opencv.js`)
-- `video_api_url`: runtime URL for your video API endpoint (example: `/mcv/videos`)
+- `common`:
+  - `video_api_url`: relative API path (example: `/mcv/videos`)
+  - `website_url`: absolute site base URL (example: `https://dartjs.com`)
+- `web`:
+  - `site_root`: root of your website project, all other web paths are relative to this
+  - `component_dest`: destination folder for `MCV.tsx`
+  - `opencv_dest`: destination folder for `opencv.js` (optional if you don't build it yourself)
+  - `opencv_url`: runtime URL used by the app to load OpenCV.js (example: `/opencv.js`)
+- `python`:
+  - reserved for python-target settings
+
+Video API behavior:
+
+- Web target uses `common.video_api_url` directly (relative path, works on localhost/dev).
+- Python uses an absolute path constructed by combining `common.website_url` and `common.video_api_url`.
 
 ## Build OpenCV.js
 
@@ -92,7 +102,7 @@ Useful flags:
 - `--simd` / `--no-simd` to toggle WASM SIMD
 - `--cmake-option=...` to pass extra CMake options
 
-Expected output:
+Expected output (automatically picked up by the web build):
 
 - `build/opencv_js_mcv_single/bin/opencv.js`
 

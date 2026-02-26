@@ -48,37 +48,47 @@ async function main() {
   const knownValueOptions = new Set(["target", "dest", "config"]);
   const positionals = parsePositionals(argv, knownValueOptions);
   const destinationDir = parseOption(argv, "dest") || (target === "web" ? positionals[0] ?? null : null);
-  const configPath =
-    parseOption(argv, "config") || path.join(__dirname, "web.target.config.json");
+  const configPath = parseOption(argv, "config") || path.join(__dirname, "config.json");
+
+  let rootConfig = { common: {}, web: {}, python: {} };
+  try {
+    const configRaw = await fs.readFile(configPath, "utf8");
+    const parsed = JSON.parse(configRaw);
+    rootConfig = {
+      common: parsed && typeof parsed.common === "object" ? parsed.common : {},
+      web: parsed && typeof parsed.web === "object" ? parsed.web : {},
+      python: parsed && typeof parsed.python === "object" ? parsed.python : {},
+    };
+  } catch (error) {
+    if (!error || error.code !== "ENOENT") {
+      throw error;
+    }
+  }
 
   if (target === "python") {
-    const result = await buildPythonTarget();
+    const result = await buildPythonTarget({
+      commonConfig: rootConfig.common,
+      pythonConfig: rootConfig.python,
+    });
     printResult("Python build", result, "Python standalone", result.standaloneScriptPath);
     return;
   }
 
   if (target === "web") {
-    let webConfig = null;
+    const webConfig = rootConfig.web;
+    const commonConfig = rootConfig.common;
     let configuredDestinations = [];
-    try {
-      const configRaw = await fs.readFile(configPath, "utf8");
-      const config = JSON.parse(configRaw);
-      webConfig = config;
-      if (Array.isArray(config.destinations)) {
-        configuredDestinations = config.destinations.filter(
+    if (Array.isArray(webConfig.destinations)) {
+      configuredDestinations = webConfig.destinations.filter(
           (value) => typeof value === "string" && value.trim()
         );
-      }
-    } catch (error) {
-      if (error && error.code !== "ENOENT") {
-        throw error;
-      }
     }
 
     const result = await buildWebTarget({
       destinationDir,
       destinations: configuredDestinations,
       webConfig,
+      commonConfig,
     });
     printResult("Web build", result, "Web target placeholder", result.webHtmlPath);
     console.log("React wrapper:");
@@ -98,7 +108,7 @@ async function main() {
   console.error("Invalid or missing target.");
   console.error("Usage: node build/build.js --target python");
   console.error("   or: node build/build.js --target web [--dest <folder>]");
-  console.error("   or: node build/build.js --target web [--config <path-to-web-config>]");
+  console.error("   or: node build/build.js --target web [--config <path-to-config.json>]");
   console.error("   or: npm run build:web -- <folder>");
   process.exit(1);
 }

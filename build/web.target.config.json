@@ -1,7 +1,0 @@
-{
-  "site_root": "C:\\dev\\dartjs",
-  "component_dest": "\\components",
-  "opencv_dest": "\\public",
-  "opencv_url": "/opencv.js",
-  "video_api_url": "/mcv/videos"
-}

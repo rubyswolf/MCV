@@ -1,0 +1,13 @@
+{
+  "common": {
+    "video_api_url": "/mcv/videos",
+    "website_url": "https://dartjs.com"
+  },
+  "web": {
+    "site_root": "C:\\dev\\dartjs",
+    "component_dest": "\\components",
+    "opencv_dest": "\\public",
+    "opencv_url": "/opencv.js"
+  },
+  "python": {}
+}
