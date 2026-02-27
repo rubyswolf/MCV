@@ -68,8 +68,9 @@ The web target depends on OpenCV.js, which is not bundled with the app. You need
 Build config is in `build/config.json`:
 
 - `common`:
-  - `video_api_url`: relative API path (example: `/mcv/videos`)
-  - `website_url`: absolute site base URL for the video API (example: `https://dartjs.com`)
+  - `media_api`: relative media API path (example: `/mcv/media.json`)
+  - `data_api`: relative data API path (example: `/mcv/data`)
+  - `website_url`: absolute site base URL for media/data APIs (example: `https://dartjs.com`)
 - `web`:
   - `site_root`: root of your website project, all other web paths are relative to this
   - `component_dest`: destination folder for `MCV.tsx`
@@ -78,44 +79,13 @@ Build config is in `build/config.json`:
 - `python`:
   - reserved for Python-target settings
 
-Video API behavior:
+Media API behavior:
 
-- Web target uses `common.video_api_url` directly (relative path, works on localhost/dev).
-- Python uses an absolute path constructed by combining `common.website_url` and `common.video_api_url`.
-- If `common.video_api_url` is omitted, video API access is disabled by default.
+- Web target uses `common.media_api` and `common.data_api` directly (relative paths, works on localhost/dev).
+- Python uses absolute paths constructed by combining `common.website_url` with `common.media_api` and `common.data_api`.
+- If either API path is omitted, that API is disabled by default.
 
-## Video API Schema (DIY)
-
-MCV does not ship with a hosted video API. You need to implement this endpoint on your own website/backend.
-
-Expected endpoint:
-
-- `GET {video_api_url}`
-
-Example of an expected JSON response:
-
-```json
-{
-  "videos": {
-    "mcc11-dream-parkour": {
-      "name": "Dream MCC 11 Parkour",
-      "url": "https://example.com/videos/mcc11-dream-parkour.mp4",
-      "youtube_id": "dQw4w9WgXcQ"
-    }
-  }
-}
-```
-
-Schema notes:
-
-- `videos`: required object
-- each key in videos is your custom stable video ID
-- each value:
-  - `name` (required string): display name
-  - `url` (required string): direct playable video URL (raw file URL, not a YouTube/Vimeo/etc. page)
-  - `youtube_id` (optional string): source YouTube ID when applicable
-
-This API is intentionally simple and provider-agnostic. You can back it with R2, S3, local files, or any other storage, as long as the returned `url` is accesible to your MCV target.
+Media API schema docs are in `APIs.md`.
 
 ## Build OpenCV.js
 

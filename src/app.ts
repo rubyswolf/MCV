@@ -28,12 +28,24 @@ type McvOpencvTestResult = {
   mean_gray: number;
 };
 
+type McvMediaApi = {
+  url: string;
+  available: () => boolean;
+  fetch: () => Promise<Response>;
+};
+
+type McvDataApi = {
+  url: string;
+  available: () => boolean;
+};
+
 type McvClientApi = {
-  callMcvApi: typeof callMcvApi;
-  fetchVideoCatalog: typeof fetchVideoCatalog;
-  hasVideoApiUrl: typeof hasVideoApiUrl;
-  backend: "python" | "web";
-  videoApiUrl: string;
+  media: McvMediaApi;
+  data: McvDataApi;
+  mcv: {
+    call: typeof callMcvApi;
+    backend: "python" | "web";
+  };
 };
 
 declare global {
@@ -44,7 +56,8 @@ declare global {
 
 declare const __MCV_BACKEND__: "python" | "web";
 declare const __MCV_OPENCV_URL__: string;
-declare const __MCV_VIDEO_API_URL__: string;
+declare const __MCV_MEDIA_API_URL__: string;
+declare const __MCV_DATA_API_URL__: string;
 
 let cvPromise: Promise<unknown> | null = null;
 
@@ -186,21 +199,33 @@ async function callMcvApi<TData>(requestBody: McvRequest): Promise<McvResponse<T
   }
 }
 
-async function fetchVideoCatalog(): Promise<Response> {
-  return fetch(__MCV_VIDEO_API_URL__);
+async function fetchMediaApi(): Promise<Response> {
+  return fetch(__MCV_MEDIA_API_URL__);
 }
 
-function hasVideoApiUrl(): boolean {
-  return typeof __MCV_VIDEO_API_URL__ === "string" && __MCV_VIDEO_API_URL__.trim().length > 0;
+function isMediaApiAvailable(): boolean {
+  return typeof __MCV_MEDIA_API_URL__ === "string" && __MCV_MEDIA_API_URL__.trim().length > 0;
+}
+
+function isDataApiAvailable(): boolean {
+  return typeof __MCV_DATA_API_URL__ === "string" && __MCV_DATA_API_URL__.trim().length > 0;
 }
 
 function installGlobalApi(): void {
   window.MCV_API = {
-    callMcvApi,
-    fetchVideoCatalog,
-    hasVideoApiUrl,
-    backend: __MCV_BACKEND__,
-    videoApiUrl: __MCV_VIDEO_API_URL__,
+    media: {
+      url: __MCV_MEDIA_API_URL__,
+      available: isMediaApiAvailable,
+      fetch: fetchMediaApi,
+    },
+    data: {
+      url: __MCV_DATA_API_URL__,
+      available: isDataApiAvailable,
+    },
+    mcv: {
+      call: callMcvApi,
+      backend: __MCV_BACKEND__,
+    },
   };
 }
 
@@ -219,11 +244,14 @@ function setOutput(message: string): void {
 }
 
 async function checkHealth(): Promise<void> {
+  const mediaStatus = isMediaApiAvailable() ? __MCV_MEDIA_API_URL__ : "disabled";
+  const dataStatus = isDataApiAvailable() ? __MCV_DATA_API_URL__ : "disabled";
+
   if (__MCV_BACKEND__ === "web") {
     try {
       const cv = await getWebMcvRuntime();
       setStatus(
-        `Connected to web backend (opencv.js ${String((cv as any).VERSION ?? "ready")}, videos at ${__MCV_VIDEO_API_URL__})`
+        `Connected to web backend (opencv.js ${String((cv as any).VERSION ?? "ready")}, media API: ${mediaStatus}, data API: ${dataStatus})`
       );
       return;
     } catch (error) {
@@ -244,7 +272,7 @@ async function checkHealth(): Promise<void> {
       return;
     }
     setStatus(
-      `Connected to backend (${payload.backend ?? "unknown"}, videos at ${__MCV_VIDEO_API_URL__})`
+      `Connected to backend (${payload.backend ?? "unknown"}, media API: ${mediaStatus}, data API: ${dataStatus})`
     );
   } catch {
     setStatus("Could not connect to backend");

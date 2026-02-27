@@ -1,5 +1,7 @@
 {
   "common": {
+    "media_api": "/mcv/media.json",
+    "data_api": "/mcv/data",
     "website_url": "https://dartjs.com"
   },
   "web": {

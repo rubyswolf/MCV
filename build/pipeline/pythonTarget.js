@@ -29,19 +29,25 @@ async function buildPythonTarget(options = {}) {
   const commonConfig =
     options.commonConfig && typeof options.commonConfig === "object" ? options.commonConfig : {};
 
-  const relativeVideoApiUrl =
-    typeof commonConfig.video_api_url === "string" && commonConfig.video_api_url.trim()
-      ? commonConfig.video_api_url
+  const relativeMediaApiUrl =
+    typeof commonConfig.media_api === "string" && commonConfig.media_api.trim()
+      ? commonConfig.media_api
+      : "";
+  const relativeDataApiUrl =
+    typeof commonConfig.data_api === "string" && commonConfig.data_api.trim()
+      ? commonConfig.data_api
       : "";
   const websiteUrl =
     typeof commonConfig.website_url === "string" && commonConfig.website_url.trim()
       ? commonConfig.website_url
       : "";
-  const absoluteVideoApiUrl = combineAbsoluteUrl(websiteUrl, relativeVideoApiUrl);
+  const absoluteMediaApiUrl = combineAbsoluteUrl(websiteUrl, relativeMediaApiUrl);
+  const absoluteDataApiUrl = combineAbsoluteUrl(websiteUrl, relativeDataApiUrl);
 
   const commonArtifacts = await buildCommonArtifacts({
     backendMode: "python",
-    videoApiUrl: absoluteVideoApiUrl || relativeVideoApiUrl || "",
+    mediaApiUrl: absoluteMediaApiUrl || relativeMediaApiUrl || "",
+    dataApiUrl: absoluteDataApiUrl || relativeDataApiUrl || "",
   });
   await ensureDir(DIST_PYTHON_DIR);
 

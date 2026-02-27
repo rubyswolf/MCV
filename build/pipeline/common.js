@@ -18,9 +18,13 @@ async function buildCommonArtifacts() {
     typeof options.opencvUrl === "string" && options.opencvUrl.trim()
       ? options.opencvUrl
       : "/opencv.js";
-  const videoApiUrl =
-    typeof options.videoApiUrl === "string"
-      ? options.videoApiUrl
+  const mediaApiUrl =
+    typeof options.mediaApiUrl === "string"
+      ? options.mediaApiUrl
+      : "";
+  const dataApiUrl =
+    typeof options.dataApiUrl === "string"
+      ? options.dataApiUrl
       : "";
 
   await ensureDir(DIST_COMMON_DIR);
@@ -43,7 +47,8 @@ async function buildCommonArtifacts() {
     define: {
       __MCV_BACKEND__: JSON.stringify(backendMode),
       __MCV_OPENCV_URL__: JSON.stringify(opencvUrl),
-      __MCV_VIDEO_API_URL__: JSON.stringify(videoApiUrl),
+      __MCV_MEDIA_API_URL__: JSON.stringify(mediaApiUrl),
+      __MCV_DATA_API_URL__: JSON.stringify(dataApiUrl),
     },
   });
 
@@ -55,8 +60,10 @@ async function buildCommonArtifacts() {
     backendMode === "web"
       ? [
           "      background: transparent;",
-          "      min-height: 100%;",
-          "      padding: 0;",
+          "      min-height: 100vh;",
+          "      display: grid;",
+          "      place-items: center;",
+          "      padding: 24px;",
         ].join("\n")
       : [
           "      background: radial-gradient(1200px 600px at 30% -10%, #233247, var(--bg));",
