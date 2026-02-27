@@ -51,12 +51,27 @@ async function buildCommonArtifacts() {
   await fs.writeFile(appBundlePath, appBundle, "utf8");
 
   const template = await fs.readFile(htmlTemplatePath, "utf8");
+  const bodyStyleBlock =
+    backendMode === "web"
+      ? [
+          "      background: transparent;",
+          "      min-height: 100%;",
+          "      padding: 0;",
+        ].join("\n")
+      : [
+          "      background: radial-gradient(1200px 600px at 30% -10%, #233247, var(--bg));",
+          "      min-height: 100vh;",
+          "      display: grid;",
+          "      place-items: center;",
+          "      padding: 24px;",
+        ].join("\n");
   const safeInlineBundle = appBundle.replace(/<\/script/gi, "<\\/script");
   const backendScripts =
     backendMode === "web"
       ? `<script src="${opencvUrl.replace(/"/g, "&quot;")}"></script>`
       : "";
   const inlineHtml = template
+    .replace("__MCV_BODY_STYLE__", bodyStyleBlock)
     .replace("__BACKEND_SCRIPTS__", backendScripts)
     .replace("__APP_JS__", safeInlineBundle);
   await fs.writeFile(inlineHtmlPath, inlineHtml, "utf8");
