@@ -34,34 +34,25 @@ type McvImagePipelineArgs = {
   canny_threshold2?: number;
 };
 
-type McvImagePipelineStageName = "grayscale" | "edges";
+type McvLineSegment = [number, number, number, number];
 
-type McvImagePipelineStageEvent = {
-  type: "stage";
-  stage: McvImagePipelineStageName;
-  image_data_url: string;
+type McvImagePipelineResult = {
+  grayscale_image_data_url: string;
+  line_segments: McvLineSegment[];
   width: number;
   height: number;
-};
-
-type McvImagePipelineDoneEvent = {
-  type: "done";
   duration_ms?: number;
 };
 
-type McvImagePipelineErrorEvent = {
-  type: "error";
-  code: string;
-  message: string;
-  details?: unknown;
+type McvImagePipelineHttpResponse = {
+  ok: boolean;
+  data?: McvImagePipelineResult;
+  error?: {
+    code?: string;
+    message?: string;
+    details?: unknown;
+  };
 };
-
-type McvImagePipelineEvent =
-  | McvImagePipelineStageEvent
-  | McvImagePipelineDoneEvent
-  | McvImagePipelineErrorEvent;
-
-type McvImagePipelineEventHandler = (event: McvImagePipelineEvent) => void;
 
 type McvMediaApi = {
   url: string;
@@ -131,6 +122,20 @@ type LaunchSelectionIntent = {
   fRaw: string;
 };
 
+type SelectionRectClient = {
+  left: number;
+  top: number;
+  width: number;
+  height: number;
+};
+
+type SelectionRectPixels = {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+};
+
 declare global {
   interface Window {
     MCV_API?: McvClientApi;
@@ -155,7 +160,12 @@ let viewerHmsInput: HTMLInputElement | null = null;
 let viewerEditingField: "hms" | null = null;
 let launchSelectionIntent: LaunchSelectionIntent | null = null;
 let imageSelectionStartPoint: { x: number; y: number } | null = null;
+let imageSelectionCurrentPoint: { x: number; y: number } | null = null;
 let isImageSelectionDragging = false;
+let activeSelectionRectClient: SelectionRectClient | null = null;
+let activeSelectionRectPixels: SelectionRectPixels | null = null;
+let selectionPipelineTokenCounter = 0;
+let activeSelectionPipelineToken = 0;
 let mediaLibrary: MediaLibrary = {
   videos: {},
   images: {},
@@ -229,13 +239,6 @@ async function getWebMcvRuntime(): Promise<any> {
   return cvPromise;
 }
 
-function emitImagePipelineEvent(
-  onEvent: McvImagePipelineEventHandler,
-  event: McvImagePipelineEvent
-): void {
-  onEvent(event);
-}
-
 async function decodeImageDataUrlToCanvas(dataUrl: string): Promise<HTMLCanvasElement> {
   return await new Promise<HTMLCanvasElement>((resolve, reject) => {
     const image = new Image();
@@ -265,245 +268,151 @@ async function decodeImageDataUrlToCanvas(dataUrl: string): Promise<HTMLCanvasEl
   });
 }
 
-function grayMatToPngDataUrl(cv: any, grayMat: any): string {
-  const rgba = new cv.Mat();
-  try {
-    cv.cvtColor(grayMat, rgba, cv.COLOR_GRAY2RGBA);
-    const width = Number(rgba.cols);
-    const height = Number(rgba.rows);
-    const canvas = document.createElement("canvas");
-    canvas.width = width;
-    canvas.height = height;
-    const ctx = canvas.getContext("2d");
-    if (!ctx) {
-      throw new Error("Canvas context unavailable");
-    }
-    const dataCopy = new Uint8ClampedArray(rgba.data);
-    const imageData = new ImageData(dataCopy, width, height);
-    ctx.putImageData(imageData, 0, 0);
-    return canvas.toDataURL("image/png");
-  } finally {
-    rgba.delete();
+function grayArrayToPngDataUrl(gray: Uint8Array, width: number, height: number): string {
+  const canvas = document.createElement("canvas");
+  canvas.width = width;
+  canvas.height = height;
+  const ctx = canvas.getContext("2d");
+  if (!ctx) {
+    throw new Error("Canvas context unavailable");
   }
+
+  const rgba = new Uint8ClampedArray(width * height * 4);
+  for (let i = 0, p = 0; i < gray.length; i += 1, p += 4) {
+    const value = gray[i];
+    rgba[p] = value;
+    rgba[p + 1] = value;
+    rgba[p + 2] = value;
+    rgba[p + 3] = 255;
+  }
+  ctx.putImageData(new ImageData(rgba, width, height), 0, 0);
+  return canvas.toDataURL("image/png");
 }
 
-function sanitizeCannyThreshold(value: unknown, fallback: number): number {
-  if (typeof value !== "number" || !Number.isFinite(value)) {
-    return fallback;
+function decodeLineSegmentsFromMat(linesMat: any): McvLineSegment[] {
+  if (!linesMat || typeof linesMat.rows !== "number" || linesMat.rows <= 0) {
+    return [];
   }
-  if (value < 0) {
-    return 0;
+  const data = linesMat.data32F as Float32Array | undefined;
+  if (!data || data.length < 4) {
+    return [];
   }
-  return value;
+  const segments: McvLineSegment[] = [];
+  for (let i = 0; i + 3 < data.length; i += 4) {
+    segments.push([data[i], data[i + 1], data[i + 2], data[i + 3]]);
+  }
+  return segments;
+}
+
+function detectLineSegmentsWeb(cv: any, grayMat: any): McvLineSegment[] {
+  let lsd: any = null;
+  let linesMat: any = null;
+  let widthsMat: any = null;
+  let precisionsMat: any = null;
+  let nfasMat: any = null;
+  try {
+    try {
+      lsd = cv.createLineSegmentDetector(cv.LSD_REFINE_STD ?? 1);
+    } catch {
+      lsd = cv.createLineSegmentDetector();
+    }
+    linesMat = new cv.Mat();
+    widthsMat = new cv.Mat();
+    precisionsMat = new cv.Mat();
+    nfasMat = new cv.Mat();
+    // OpenCV.js binding requires explicit output mats for detect(...).
+    lsd.detect(grayMat, linesMat, widthsMat, precisionsMat, nfasMat);
+    return decodeLineSegmentsFromMat(linesMat);
+  } finally {
+    if (nfasMat && typeof nfasMat.delete === "function") {
+      nfasMat.delete();
+    }
+    if (precisionsMat && typeof precisionsMat.delete === "function") {
+      precisionsMat.delete();
+    }
+    if (widthsMat && typeof widthsMat.delete === "function") {
+      widthsMat.delete();
+    }
+    if (linesMat && typeof linesMat.delete === "function") {
+      linesMat.delete();
+    }
+    if (lsd && typeof lsd.delete === "function") {
+      lsd.delete();
+    }
+  }
 }
 
 async function runWebImagePipeline(
-  args: McvImagePipelineArgs,
-  onEvent: McvImagePipelineEventHandler
-): Promise<void> {
+  args: McvImagePipelineArgs
+): Promise<McvImagePipelineResult> {
   const cv = await getWebMcvRuntime();
-  let srcRgba: any = null;
-  let gray: any = null;
-  let edges: any = null;
+  const startedAtMs = performance.now();
+  const canvas = await decodeImageDataUrlToCanvas(args.image_data_url);
+  const ctx = canvas.getContext("2d");
+  if (!ctx) {
+    throw new Error("Canvas context unavailable");
+  }
+  const width = canvas.width;
+  const height = canvas.height;
+  const imageData = ctx.getImageData(0, 0, width, height);
+  const src = imageData.data;
+
+  const gray = new Uint8Array(width * height);
+  for (let srcIndex = 0, dstIndex = 0; srcIndex < src.length; srcIndex += 4, dstIndex += 1) {
+    gray[dstIndex] = Math.round((src[srcIndex] + src[srcIndex + 1] + src[srcIndex + 2]) / 3);
+  }
+
+  let grayMat: any = null;
+  let lineSegments: McvLineSegment[] = [];
   try {
-    const canvas = await decodeImageDataUrlToCanvas(args.image_data_url);
-    const ctx = canvas.getContext("2d");
-    if (!ctx) {
-      throw new Error("Canvas context unavailable");
-    }
-    const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
-    srcRgba = new cv.Mat(canvas.height, canvas.width, cv.CV_8UC4);
-    srcRgba.data.set(imageData.data);
-
-    gray = new cv.Mat();
-    cv.cvtColor(srcRgba, gray, cv.COLOR_RGBA2GRAY);
-    emitImagePipelineEvent(onEvent, {
-      type: "stage",
-      stage: "grayscale",
-      image_data_url: grayMatToPngDataUrl(cv, gray),
-      width: Number(gray.cols),
-      height: Number(gray.rows),
-    });
-
-    await new Promise((resolve) => setTimeout(resolve, 0));
-
-    const threshold1 = sanitizeCannyThreshold(args.canny_threshold1, 80);
-    const threshold2 = sanitizeCannyThreshold(args.canny_threshold2, 160);
-    edges = new cv.Mat();
-    cv.Canny(gray, edges, threshold1, threshold2);
-    emitImagePipelineEvent(onEvent, {
-      type: "stage",
-      stage: "edges",
-      image_data_url: grayMatToPngDataUrl(cv, edges),
-      width: Number(edges.cols),
-      height: Number(edges.rows),
-    });
-    emitImagePipelineEvent(onEvent, { type: "done" });
-  } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
-    emitImagePipelineEvent(onEvent, {
-      type: "error",
-      code: "WEB_PIPELINE_ERROR",
-      message,
-      details: String(error),
-    });
-    throw error;
+    grayMat = new cv.Mat(height, width, cv.CV_8UC1);
+    grayMat.data.set(gray);
+    lineSegments = detectLineSegmentsWeb(cv, grayMat);
   } finally {
-    if (edges) {
-      edges.delete();
-    }
-    if (gray) {
-      gray.delete();
-    }
-    if (srcRgba) {
-      srcRgba.delete();
+    if (grayMat) {
+      grayMat.delete();
     }
   }
+
+  return {
+    grayscale_image_data_url: grayArrayToPngDataUrl(gray, width, height),
+    line_segments: lineSegments,
+    width,
+    height,
+    duration_ms: Math.max(0, Math.round(performance.now() - startedAtMs)),
+  };
 }
 
-type PythonPipelineStartResponse = {
-  ok: boolean;
-  data?: {
-    job_id?: string;
-  };
-  error?: {
-    code?: string;
-    message?: string;
-    details?: unknown;
-  };
-};
-
 async function runPythonImagePipeline(
-  args: McvImagePipelineArgs,
-  onEvent: McvImagePipelineEventHandler
-): Promise<void> {
-  const startResponse = await fetch("/api/mcv/pipeline", {
+  args: McvImagePipelineArgs
+): Promise<McvImagePipelineResult> {
+  const response = await fetch("/api/mcv/pipeline", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ args }),
   });
-  if (!startResponse.ok) {
-    const message = `HTTP ${startResponse.status}`;
-    emitImagePipelineEvent(onEvent, {
-      type: "error",
-      code: "HTTP_ERROR",
-      message,
-    });
-    throw new Error(message);
+  if (!response.ok) {
+    throw new Error(`HTTP ${response.status}`);
   }
 
-  const startPayload = (await startResponse.json()) as PythonPipelineStartResponse;
-  if (!startPayload.ok || !startPayload.data?.job_id) {
-    const message = startPayload.error?.message || "Pipeline start failed";
-    emitImagePipelineEvent(onEvent, {
-      type: "error",
-      code: startPayload.error?.code || "PIPELINE_START_FAILED",
-      message,
-      details: startPayload.error?.details,
-    });
+  const payload = (await response.json()) as McvImagePipelineHttpResponse;
+  if (!payload.ok || !payload.data) {
+    const message = payload.error?.message || "Pipeline failed";
     throw new Error(message);
   }
-
-  const jobId = startPayload.data.job_id;
-
-  await new Promise<void>((resolve, reject) => {
-    const streamUrl = `/api/mcv/pipeline/${encodeURIComponent(jobId)}/events`;
-    const stream = new EventSource(streamUrl);
-
-    const closeWithError = (errorCode: string, message: string, details?: unknown) => {
-      emitImagePipelineEvent(onEvent, {
-        type: "error",
-        code: errorCode,
-        message,
-        details,
-      });
-      stream.close();
-      reject(new Error(message));
-    };
-
-    stream.addEventListener("stage", (event) => {
-      try {
-        const parsed = JSON.parse((event as MessageEvent).data || "{}") as {
-          stage?: unknown;
-          image_data_url?: unknown;
-          width?: unknown;
-          height?: unknown;
-        };
-        if (parsed.stage !== "grayscale" && parsed.stage !== "edges") {
-          return;
-        }
-        if (typeof parsed.image_data_url !== "string") {
-          return;
-        }
-        emitImagePipelineEvent(onEvent, {
-          type: "stage",
-          stage: parsed.stage,
-          image_data_url: parsed.image_data_url,
-          width: typeof parsed.width === "number" ? parsed.width : 0,
-          height: typeof parsed.height === "number" ? parsed.height : 0,
-        });
-      } catch (error) {
-        closeWithError("PIPELINE_STREAM_PARSE_ERROR", "Failed to parse stage event", String(error));
-      }
-    });
-
-    stream.addEventListener("complete", (event) => {
-      try {
-        const parsed = JSON.parse((event as MessageEvent).data || "{}") as { duration_ms?: unknown };
-        emitImagePipelineEvent(onEvent, {
-          type: "done",
-          duration_ms: typeof parsed.duration_ms === "number" ? parsed.duration_ms : undefined,
-        });
-        stream.close();
-        resolve();
-      } catch (error) {
-        closeWithError("PIPELINE_STREAM_PARSE_ERROR", "Failed to parse completion event", String(error));
-      }
-    });
-
-    stream.addEventListener("pipeline_error", (event) => {
-      try {
-        const parsed = JSON.parse((event as MessageEvent).data || "{}") as {
-          code?: unknown;
-          message?: unknown;
-          details?: unknown;
-        };
-        closeWithError(
-          typeof parsed.code === "string" ? parsed.code : "PIPELINE_ERROR",
-          typeof parsed.message === "string" ? parsed.message : "Pipeline processing failed",
-          parsed.details
-        );
-      } catch (error) {
-        closeWithError("PIPELINE_ERROR", "Pipeline processing failed", String(error));
-      }
-    });
-
-    stream.onerror = () => {
-      closeWithError("PIPELINE_STREAM_ERROR", "Pipeline stream connection failed");
-    };
-  });
+  return payload.data;
 }
 
-async function runImagePipeline(
-  args: McvImagePipelineArgs,
-  onEvent: McvImagePipelineEventHandler
-): Promise<void> {
+async function runImagePipeline(args: McvImagePipelineArgs): Promise<McvImagePipelineResult> {
   if (!args || typeof args.image_data_url !== "string" || !args.image_data_url.trim()) {
-    const message = "image_data_url is required";
-    emitImagePipelineEvent(onEvent, {
-      type: "error",
-      code: "INVALID_ARGS",
-      message,
-    });
-    throw new Error(message);
+    throw new Error("image_data_url is required");
   }
 
   if (__MCV_BACKEND__ === "web") {
-    await runWebImagePipeline(args, onEvent);
-    return;
+    return await runWebImagePipeline(args);
   }
 
-  await runPythonImagePipeline(args, onEvent);
+  return await runPythonImagePipeline(args);
 }
 
 async function callMcvApi<TData>(requestBody: McvRequest): Promise<McvResponse<TData>> {
@@ -648,11 +557,40 @@ function getViewerSelectionBoxNode(): HTMLDivElement | null {
   return document.getElementById("viewer-selection-box") as HTMLDivElement | null;
 }
 
+function getViewerCropResultNode(): HTMLDivElement | null {
+  return document.getElementById("viewer-crop-result") as HTMLDivElement | null;
+}
+
+function hideViewerCropResult(): void {
+  const cropResultNode = getViewerCropResultNode();
+  if (cropResultNode) {
+    cropResultNode.replaceChildren();
+    cropResultNode.classList.add("hidden");
+  }
+}
+
+function showViewerCropResult(): void {
+  const cropResultNode = getViewerCropResultNode();
+  if (!cropResultNode) {
+    return;
+  }
+  cropResultNode.classList.remove("hidden");
+}
+
+function setViewerSelectionBoxState(state: "default" | "cropping"): void {
+  const selectionBox = getViewerSelectionBoxNode();
+  if (!selectionBox) {
+    return;
+  }
+  selectionBox.classList.toggle("is-cropping", state === "cropping");
+}
+
 function hideViewerSelectionBox(): void {
   const selectionBox = getViewerSelectionBoxNode();
   if (!selectionBox) {
     return;
   }
+  setViewerSelectionBoxState("default");
   selectionBox.classList.add("hidden");
 }
 
@@ -671,27 +609,133 @@ function clampPointToImageBounds(clientX: number, clientY: number): { x: number;
   };
 }
 
-function updateViewerSelectionBox(startClient: { x: number; y: number }, currentClient: { x: number; y: number }): void {
+function createSelectionRectFromPoints(
+  startClient: { x: number; y: number },
+  currentClient: { x: number; y: number }
+): SelectionRectClient | null {
   const stage = getViewerFullImageStageNode();
-  const selectionBox = getViewerSelectionBoxNode();
   const clampedStart = clampPointToImageBounds(startClient.x, startClient.y);
   const clampedCurrent = clampPointToImageBounds(currentClient.x, currentClient.y);
-  if (!stage || !selectionBox || !clampedStart || !clampedCurrent) {
-    hideViewerSelectionBox();
-    return;
+  if (!stage || !clampedStart || !clampedCurrent) {
+    return null;
   }
-
   const stageRect = stage.getBoundingClientRect();
   const left = Math.min(clampedStart.x, clampedCurrent.x) - stageRect.left;
   const top = Math.min(clampedStart.y, clampedCurrent.y) - stageRect.top;
   const width = Math.abs(clampedCurrent.x - clampedStart.x);
   const height = Math.abs(clampedCurrent.y - clampedStart.y);
+  return { left, top, width, height };
+}
 
-  selectionBox.style.left = `${left}px`;
-  selectionBox.style.top = `${top}px`;
-  selectionBox.style.width = `${width}px`;
-  selectionBox.style.height = `${height}px`;
+function applySelectionRect(rect: SelectionRectClient): void {
+  const stage = getViewerFullImageStageNode();
+  const selectionBox = getViewerSelectionBoxNode();
+  if (!stage || !selectionBox) {
+    hideViewerSelectionBox();
+    return;
+  }
+  selectionBox.style.left = `${rect.left}px`;
+  selectionBox.style.top = `${rect.top}px`;
+  selectionBox.style.width = `${rect.width}px`;
+  selectionBox.style.height = `${rect.height}px`;
   selectionBox.classList.remove("hidden");
+}
+
+function updateViewerSelectionBox(
+  startClient: { x: number; y: number },
+  currentClient: { x: number; y: number }
+): SelectionRectClient | null {
+  const rect = createSelectionRectFromPoints(startClient, currentClient);
+  if (!rect) {
+    hideViewerSelectionBox();
+    return null;
+  }
+  applySelectionRect(rect);
+  return rect;
+}
+
+function createSelectionPixelsFromRect(rect: SelectionRectClient): SelectionRectPixels | null {
+  const image = getViewerFullImageNode();
+  if (!image) {
+    return null;
+  }
+  const imageRect = image.getBoundingClientRect();
+  const naturalWidth = image.naturalWidth || image.width;
+  const naturalHeight = image.naturalHeight || image.height;
+  if (imageRect.width <= 0 || imageRect.height <= 0 || naturalWidth <= 0 || naturalHeight <= 0) {
+    return null;
+  }
+
+  const stage = getViewerFullImageStageNode();
+  if (!stage) {
+    return null;
+  }
+  const stageRect = stage.getBoundingClientRect();
+  const rectClientLeft = stageRect.left + rect.left;
+  const rectClientTop = stageRect.top + rect.top;
+  const rectClientRight = rectClientLeft + rect.width;
+  const rectClientBottom = rectClientTop + rect.height;
+
+  const clampedLeft = Math.max(imageRect.left, Math.min(imageRect.right, rectClientLeft));
+  const clampedTop = Math.max(imageRect.top, Math.min(imageRect.bottom, rectClientTop));
+  const clampedRight = Math.max(imageRect.left, Math.min(imageRect.right, rectClientRight));
+  const clampedBottom = Math.max(imageRect.top, Math.min(imageRect.bottom, rectClientBottom));
+
+  const widthClient = Math.max(1, clampedRight - clampedLeft);
+  const heightClient = Math.max(1, clampedBottom - clampedTop);
+
+  const x = Math.max(
+    0,
+    Math.min(naturalWidth - 1, Math.round(((clampedLeft - imageRect.left) / imageRect.width) * naturalWidth))
+  );
+  const y = Math.max(
+    0,
+    Math.min(naturalHeight - 1, Math.round(((clampedTop - imageRect.top) / imageRect.height) * naturalHeight))
+  );
+  const width = Math.max(1, Math.min(naturalWidth - x, Math.round((widthClient / imageRect.width) * naturalWidth)));
+  const height = Math.max(
+    1,
+    Math.min(naturalHeight - y, Math.round((heightClient / imageRect.height) * naturalHeight))
+  );
+
+  if (width < 2 || height < 2) {
+    return null;
+  }
+  return { x, y, width, height };
+}
+
+function createCropDataUrlFromPixels(rectPixels: SelectionRectPixels): string {
+  const image = getViewerFullImageNode();
+  if (!image) {
+    throw new Error("No image selected");
+  }
+  const cropCanvas = document.createElement("canvas");
+  cropCanvas.width = rectPixels.width;
+  cropCanvas.height = rectPixels.height;
+  const ctx = cropCanvas.getContext("2d");
+  if (!ctx) {
+    throw new Error("Canvas context unavailable");
+  }
+  ctx.drawImage(
+    image,
+    rectPixels.x,
+    rectPixels.y,
+    rectPixels.width,
+    rectPixels.height,
+    0,
+    0,
+    rectPixels.width,
+    rectPixels.height
+  );
+  return cropCanvas.toDataURL("image/png");
+}
+
+function showFullImageLayer(): void {
+  const image = getViewerFullImageNode();
+  if (image) {
+    image.classList.remove("hidden");
+  }
+  hideViewerCropResult();
 }
 
 function clearViewerFullImage(): void {
@@ -699,6 +743,7 @@ function clearViewerFullImage(): void {
   const image = getViewerFullImageNode();
   if (image) {
     image.onload = null;
+    image.classList.remove("hidden");
     image.removeAttribute("src");
     image.alt = "";
   }
@@ -706,7 +751,12 @@ function clearViewerFullImage(): void {
     stage.classList.add("hidden");
   }
   imageSelectionStartPoint = null;
+  imageSelectionCurrentPoint = null;
   isImageSelectionDragging = false;
+  activeSelectionRectClient = null;
+  activeSelectionRectPixels = null;
+  activeSelectionPipelineToken = ++selectionPipelineTokenCounter;
+  hideViewerCropResult();
   hideViewerSelectionBox();
 }
 
@@ -728,7 +778,13 @@ function showViewerFullImage(src: string, alt: string): void {
   if (!stage || !image) {
     return;
   }
+  activeSelectionRectClient = null;
+  activeSelectionRectPixels = null;
+  activeSelectionPipelineToken = ++selectionPipelineTokenCounter;
+  hideViewerSelectionBox();
+  hideViewerCropResult();
   image.crossOrigin = "anonymous";
+  image.classList.remove("hidden");
   image.src = src;
   image.alt = alt;
   image.onload = () => {
@@ -737,6 +793,123 @@ function showViewerFullImage(src: string, alt: string): void {
   stage.classList.remove("hidden");
   requestAnimationFrame(scrollViewerFullImageIntoView);
   window.setTimeout(scrollViewerFullImageIntoView, 60);
+}
+
+function createCropResultSvg(
+  width: number,
+  height: number,
+  grayDataUrl: string,
+  segments: McvLineSegment[]
+): SVGSVGElement {
+  const svgNs = "http://www.w3.org/2000/svg";
+  const svg = document.createElementNS(svgNs, "svg");
+  svg.classList.add("viewer-crop-result-svg");
+  svg.setAttribute("viewBox", `0 0 ${width} ${height}`);
+  svg.setAttribute("preserveAspectRatio", "xMidYMid meet");
+  svg.setAttribute("width", String(width));
+  svg.setAttribute("height", String(height));
+
+  const imageNode = document.createElementNS(svgNs, "image");
+  imageNode.setAttribute("href", grayDataUrl);
+  imageNode.setAttribute("x", "0");
+  imageNode.setAttribute("y", "0");
+  imageNode.setAttribute("width", String(width));
+  imageNode.setAttribute("height", String(height));
+  imageNode.setAttribute("preserveAspectRatio", "none");
+  svg.appendChild(imageNode);
+
+  const group = document.createElementNS(svgNs, "g");
+  group.setAttribute("stroke", "#ffffff");
+  group.setAttribute("stroke-width", "1");
+  group.setAttribute("stroke-linecap", "round");
+  group.setAttribute("vector-effect", "non-scaling-stroke");
+  for (const segment of segments) {
+    const line = document.createElementNS(svgNs, "line");
+    line.setAttribute("x1", String(segment[0]));
+    line.setAttribute("y1", String(segment[1]));
+    line.setAttribute("x2", String(segment[2]));
+    line.setAttribute("y2", String(segment[3]));
+    group.appendChild(line);
+  }
+  svg.appendChild(group);
+  return svg;
+}
+
+function sizeCropResultSvg(svg: SVGSVGElement, width: number, height: number): void {
+  const stage = getViewerFullImageStageNode();
+  const stageRect = stage?.getBoundingClientRect();
+  const availableWidth = Math.max(120, window.innerWidth - 24);
+  const viewportTop = stageRect ? Math.max(0, stageRect.top) : 0;
+  const availableHeight = Math.max(120, window.innerHeight - viewportTop - 12);
+  const scale = Math.max(0.01, Math.min(availableWidth / width, availableHeight / height));
+  svg.style.width = `${Math.floor(width * scale)}px`;
+  svg.style.height = `${Math.floor(height * scale)}px`;
+}
+
+async function renderCropResultWithLineOverlay(
+  grayDataUrl: string,
+  lineSegments: McvLineSegment[],
+  width: number,
+  height: number
+): Promise<void> {
+  const cropResultNode = getViewerCropResultNode();
+  if (!cropResultNode) {
+    return;
+  }
+
+  const svg = createCropResultSvg(width, height, grayDataUrl, lineSegments);
+  sizeCropResultSvg(svg, width, height);
+  cropResultNode.replaceChildren(svg);
+  showViewerCropResult();
+}
+
+function startSelectionPipelineFromActiveRect(): void {
+  if (!activeSelectionRectPixels) {
+    return;
+  }
+  let cropDataUrl = "";
+  try {
+    cropDataUrl = createCropDataUrlFromPixels(activeSelectionRectPixels);
+  } catch (error) {
+    setMediaError(`Failed to crop selection: ${String(error)}`);
+    return;
+  }
+
+  clearMediaError();
+  setViewerSelectionBoxState("cropping");
+  showFullImageLayer();
+
+  const token = ++selectionPipelineTokenCounter;
+  activeSelectionPipelineToken = token;
+
+  void (async () => {
+    try {
+      const result = await runImagePipeline({
+        image_data_url: cropDataUrl,
+      });
+      if (token !== activeSelectionPipelineToken) {
+        return;
+      }
+      await renderCropResultWithLineOverlay(
+        result.grayscale_image_data_url,
+        result.line_segments,
+        result.width,
+        result.height
+      );
+      const image = getViewerFullImageNode();
+      if (image) {
+        image.classList.add("hidden");
+      }
+      hideViewerSelectionBox();
+      scrollViewerFullImageIntoView();
+    } catch (error) {
+      if (token !== activeSelectionPipelineToken) {
+        return;
+      }
+      setMediaError(`Pipeline failed: ${String(error)}`);
+      setViewerSelectionBoxState("default");
+    }
+  })();
 }
 
 function setMediaError(message: string): void {
@@ -2000,13 +2173,20 @@ function installUiHandlers(): void {
       if (event.button !== 0) {
         return;
       }
+      if (viewerFullImage.classList.contains("hidden")) {
+        return;
+      }
       const start = clampPointToImageBounds(event.clientX, event.clientY);
       if (!start) {
         return;
       }
       imageSelectionStartPoint = start;
+      imageSelectionCurrentPoint = start;
       isImageSelectionDragging = true;
-      updateViewerSelectionBox(start, start);
+      const rect = updateViewerSelectionBox(start, start);
+      if (rect) {
+        setViewerSelectionBoxState("default");
+      }
       viewerFullImage.setPointerCapture(event.pointerId);
       event.preventDefault();
     });
@@ -2014,13 +2194,31 @@ function installUiHandlers(): void {
       if (!isImageSelectionDragging || !imageSelectionStartPoint) {
         return;
       }
-      updateViewerSelectionBox(imageSelectionStartPoint, { x: event.clientX, y: event.clientY });
+      imageSelectionCurrentPoint = { x: event.clientX, y: event.clientY };
+      updateViewerSelectionBox(imageSelectionStartPoint, imageSelectionCurrentPoint);
       event.preventDefault();
     });
     const finishSelection = () => {
+      if (isImageSelectionDragging && imageSelectionStartPoint && imageSelectionCurrentPoint) {
+        const rect = createSelectionRectFromPoints(imageSelectionStartPoint, imageSelectionCurrentPoint);
+        if (rect && rect.width >= 2 && rect.height >= 2) {
+          const pixelRect = createSelectionPixelsFromRect(rect);
+          if (pixelRect) {
+            activeSelectionRectClient = rect;
+            activeSelectionRectPixels = pixelRect;
+            applySelectionRect(rect);
+            setViewerSelectionBoxState("cropping");
+            startSelectionPipelineFromActiveRect();
+          } else {
+            hideViewerSelectionBox();
+          }
+        } else {
+          hideViewerSelectionBox();
+        }
+      }
       isImageSelectionDragging = false;
       imageSelectionStartPoint = null;
-      hideViewerSelectionBox();
+      imageSelectionCurrentPoint = null;
     };
     viewerFullImage.addEventListener("pointerup", () => {
       finishSelection();

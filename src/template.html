@@ -201,7 +201,7 @@ __MCV_BODY_STYLE__
       background: #1a2633;
     }
     .hidden {
-      display: none;
+      display: none !important;
     }
     .viewer-screen {
       display: grid;
@@ -254,12 +254,32 @@ __MCV_BODY_STYLE__
     .viewer-selection-box {
       position: absolute;
       border: 2px solid var(--accent);
-      background: rgba(101, 214, 166, 0.14);
+      background: transparent;
       pointer-events: none;
       z-index: 2;
     }
     .viewer-selection-box.hidden {
       display: none;
+    }
+    .viewer-selection-box.is-cropping {
+      border-color: #65d6a6;
+    }
+    .viewer-crop-result {
+      width: 100%;
+      display: grid;
+      place-items: center;
+    }
+    .viewer-crop-result.hidden {
+      display: none;
+    }
+    .viewer-crop-result-svg {
+      display: block;
+      width: auto;
+      max-width: 100%;
+      max-height: calc(100vh - 32px);
+      height: auto;
+      margin: 0 auto;
+      background: transparent;
     }
     .time-controls {
       display: grid;
@@ -345,6 +365,7 @@ __MCV_BODY_STYLE__
   <section id="viewer-full-image-stage" class="viewer-full-image-stage hidden">
     <img id="viewer-full-image" class="viewer-full-image" alt="" />
     <div id="viewer-selection-box" class="viewer-selection-box hidden"></div>
+    <div id="viewer-crop-result" class="viewer-crop-result hidden"></div>
   </section>
 __BACKEND_SCRIPTS__
   <script>

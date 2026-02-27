@@ -93,6 +93,11 @@ async function main() {
     printResult("Web build", result, "Web target placeholder", result.webHtmlPath);
     console.log("React wrapper:");
     console.log(`- ${result.reactComponentPath}`);
+    if (result.prettier && result.prettier.available) {
+      console.log(`Prettier: enabled, wrote ${result.prettier.writtenFiles} component file(s).`);
+    } else {
+      console.log("Prettier: unavailable, skipping component formatting.");
+    }
     if (result.destinationSync.length > 0) {
       console.log("Synced destinations:");
       for (const syncResult of result.destinationSync) {

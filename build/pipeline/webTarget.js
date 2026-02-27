@@ -1,5 +1,6 @@
 const fs = require("node:fs/promises");
 const path = require("node:path");
+const { spawn } = require("node:child_process");
 const { ROOT_DIR, DIST_DIR, buildCommonArtifacts, ensureDir } = require("./common");
 
 const DIST_WEB_DIR = path.join(DIST_DIR, "web");
@@ -42,7 +43,117 @@ export default function MCV(props: MCVProps) {
 `;
 }
 
-async function copyToDestination(destDir, artifacts) {
+let prettierModulePromise = null;
+
+async function getPrettierModule() {
+  if (prettierModulePromise) {
+    return prettierModulePromise;
+  }
+  prettierModulePromise = (async () => {
+    try {
+      return await import("prettier");
+    } catch {
+      return null;
+    }
+  })();
+  return prettierModulePromise;
+}
+
+function findNearestPackageRoot(startPath) {
+  let currentDir = path.dirname(startPath);
+  const root = path.parse(currentDir).root;
+  while (true) {
+    const packageJson = path.join(currentDir, "package.json");
+    try {
+      // eslint-disable-next-line no-sync
+      require("node:fs").accessSync(packageJson);
+      return currentDir;
+    } catch {
+      // continue
+    }
+    if (currentDir === root) {
+      return null;
+    }
+    currentDir = path.dirname(currentDir);
+  }
+}
+
+function runCommand(command, args, cwd) {
+  return new Promise((resolve, reject) => {
+    const child = spawn(command, args, {
+      cwd,
+      shell: true,
+      stdio: "ignore",
+    });
+    child.on("error", reject);
+    child.on("close", (code) => {
+      if (code === 0) {
+        resolve();
+      } else {
+        reject(new Error(`Command failed: ${command} ${args.join(" ")} (exit ${code})`));
+      }
+    });
+  });
+}
+
+async function maybePrettierWriteViaCli(filePath) {
+  const cwd = findNearestPackageRoot(filePath) || path.dirname(filePath);
+  const npxCommand = process.platform === "win32" ? "npx.cmd" : "npx";
+  const targetPath = path.relative(cwd, filePath) || path.basename(filePath);
+  await runCommand(npxCommand, ["prettier", "--write", targetPath], cwd);
+  return { available: true, wrote: true };
+}
+
+function resolvePrettierApi(prettierModule) {
+  if (!prettierModule) {
+    return null;
+  }
+  return prettierModule.default || prettierModule;
+}
+
+async function maybePrettierWrite(filePath) {
+  const prettierApi = resolvePrettierApi(await getPrettierModule());
+  if (!prettierApi) {
+    try {
+      return await maybePrettierWriteViaCli(filePath);
+    } catch {
+      return { available: false, wrote: false };
+    }
+  }
+
+  const current = await fs.readFile(filePath, "utf8");
+  const resolvedConfig = (await prettierApi.resolveConfig(filePath)) || {};
+  const formatOptions = {
+    ...resolvedConfig,
+    filepath: filePath,
+  };
+  const formatted = await prettierApi.format(current, formatOptions);
+
+  if (formatted !== current) {
+    await fs.writeFile(filePath, formatted, "utf8");
+  }
+
+  return { available: true, wrote: true };
+}
+
+function createPrettierSummary() {
+  return {
+    available: false,
+    writtenFiles: 0,
+  };
+}
+
+function mergePrettierSummary(summary, result) {
+  if (!result) {
+    return;
+  }
+  summary.available = summary.available || Boolean(result.available);
+  if (result.wrote) {
+    summary.writtenFiles += 1;
+  }
+}
+
+async function copyToDestination(destDir, artifacts, prettierSummary) {
   const resolvedDest = path.resolve(destDir);
   await ensureDir(resolvedDest);
 
@@ -54,16 +165,17 @@ async function copyToDestination(destDir, artifacts) {
 
   for (const [src, dst] of commonTargets) {
     await fs.copyFile(src, dst);
+    mergePrettierSummary(prettierSummary, await maybePrettierWrite(dst));
     copied.push(dst);
   }
 
   return { resolvedDest, copied };
 }
 
-async function syncDestinations(destinations, artifacts) {
+async function syncDestinations(destinations, artifacts, prettierSummary) {
   const results = [];
   for (const destination of destinations) {
-    const syncResult = await copyToDestination(destination, artifacts);
+    const syncResult = await copyToDestination(destination, artifacts, prettierSummary);
     results.push(syncResult);
   }
   return results;
@@ -103,7 +215,7 @@ function resolveOpencvOutputFilename(opencvUrl) {
   }
 }
 
-async function syncWebConfigDestinations(webConfig, artifacts) {
+async function syncWebConfigDestinations(webConfig, artifacts, prettierSummary) {
   const syncMap = new Map();
   const siteRoot =
     typeof webConfig.site_root === "string" && webConfig.site_root.trim()
@@ -115,6 +227,7 @@ async function syncWebConfigDestinations(webConfig, artifacts) {
     await ensureDir(componentDest);
     const destinationPath = path.join(componentDest, "MCV.tsx");
     await fs.copyFile(artifacts.reactComponentPath, destinationPath);
+    mergePrettierSummary(prettierSummary, await maybePrettierWrite(destinationPath));
     syncMap.set(componentDest, [destinationPath]);
   }
 
@@ -156,6 +269,8 @@ async function buildWebTarget(options = {}) {
       ? commonConfig.data_api
       : "";
 
+  const prettierSummary = createPrettierSummary();
+
   const commonArtifacts = await buildCommonArtifacts({
     backendMode: "web",
     opencvUrl,
@@ -172,6 +287,7 @@ async function buildWebTarget(options = {}) {
     renderReactWrapperTsx(commonArtifacts.inlineHtml),
     "utf8"
   );
+  mergePrettierSummary(prettierSummary, await maybePrettierWrite(reactComponentPath));
 
   const artifacts = {
     commonArtifacts,
@@ -193,12 +309,12 @@ async function buildWebTarget(options = {}) {
 
   let destinationSync = [];
   if (options.webConfig && typeof options.webConfig === "object") {
-    const configuredSync = await syncWebConfigDestinations(options.webConfig, artifacts);
+    const configuredSync = await syncWebConfigDestinations(options.webConfig, artifacts, prettierSummary);
     destinationSync.push(...configuredSync);
   }
   if (destinationList.length > 0) {
     const uniqueDestinations = [...new Set(destinationList)];
-    const fallbackSync = await syncDestinations(uniqueDestinations, artifacts);
+    const fallbackSync = await syncDestinations(uniqueDestinations, artifacts, prettierSummary);
     destinationSync.push(...fallbackSync);
   }
 
@@ -208,6 +324,7 @@ async function buildWebTarget(options = {}) {
     reactComponentPath,
     commonArtifacts,
     destinationSync,
+    prettier: prettierSummary,
   };
 }
 

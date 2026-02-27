@@ -78,9 +78,9 @@ async function buildCommonArtifacts() {
       ? `<script src="${opencvUrl.replace(/"/g, "&quot;")}"></script>`
       : "";
   const inlineHtml = template
-    .replace("__MCV_BODY_STYLE__", bodyStyleBlock)
-    .replace("__BACKEND_SCRIPTS__", backendScripts)
-    .replace("__APP_JS__", safeInlineBundle);
+    .replace("__MCV_BODY_STYLE__", () => bodyStyleBlock)
+    .replace("__BACKEND_SCRIPTS__", () => backendScripts)
+    .replace("__APP_JS__", () => safeInlineBundle);
   await fs.writeFile(inlineHtmlPath, inlineHtml, "utf8");
 
   return {
@@ -101,11 +101,7 @@ function renderPythonStandaloneScript(inlineHtml, requirementsText) {
 import sys
 from pathlib import Path
 import base64
-import json
-import queue
-import threading
 import time
-import uuid
 
 REQUIREMENTS_FILENAME = "mcv-requirements.txt"
 REQUIREMENTS_TEXT = ${requirementsAsPythonString}
@@ -142,8 +138,6 @@ except ImportError as exc:
 HTML_PAGE = ${htmlAsPythonString}
 
 app = Flask(__name__)
-PIPELINE_JOBS = {}
-PIPELINE_JOBS_LOCK = threading.Lock()
 
 
 def parse_positive_float(value, default_value):
@@ -181,62 +175,35 @@ def encode_png_data_url(image):
     return f"data:image/png;base64,{payload}"
 
 
-def get_pipeline_job(job_id):
-    with PIPELINE_JOBS_LOCK:
-        return PIPELINE_JOBS.get(job_id)
-
-
-def put_pipeline_event(job_id, event_name, payload):
-    job = get_pipeline_job(job_id)
-    if not job:
-        return
-    job["queue"].put((event_name, payload))
-
-
-def run_pipeline_job(job_id, args):
+def run_pipeline(args):
     started_at = time.time()
-    try:
-        image_data_url = args.get("image_data_url")
-        image_bgr = decode_image_data_url_to_bgr(image_data_url)
-        gray = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2GRAY)
-        put_pipeline_event(
-            job_id,
-            "stage",
-            {
-                "stage": "grayscale",
-                "image_data_url": encode_png_data_url(gray),
-                "width": int(gray.shape[1]),
-                "height": int(gray.shape[0]),
-            },
-        )
-
-        threshold1 = parse_positive_float(args.get("canny_threshold1"), 80.0)
-        threshold2 = parse_positive_float(args.get("canny_threshold2"), 160.0)
-        edges = cv2.Canny(gray, threshold1=threshold1, threshold2=threshold2)
-        put_pipeline_event(
-            job_id,
-            "stage",
-            {
-                "stage": "edges",
-                "image_data_url": encode_png_data_url(edges),
-                "width": int(edges.shape[1]),
-                "height": int(edges.shape[0]),
-            },
-        )
-
-        duration_ms = int((time.time() - started_at) * 1000)
-        put_pipeline_event(job_id, "complete", {"duration_ms": duration_ms})
-    except Exception as exc:
-        put_pipeline_event(
-            job_id,
-            "pipeline_error",
-            {
-                "code": "PIPELINE_ERROR",
-                "message": str(exc),
-            },
-        )
-    finally:
-        put_pipeline_event(job_id, "_close", {})
+    image_data_url = args.get("image_data_url")
+    image_bgr = decode_image_data_url_to_bgr(image_data_url)
+    gray = np.mean(image_bgr, axis=2).astype(np.uint8)
+    if not hasattr(cv2, "createLineSegmentDetector"):
+        raise ValueError("LineSegmentDetector is unavailable in this OpenCV build")
+    lsd = cv2.createLineSegmentDetector(cv2.LSD_REFINE_STD)
+    detect_result = lsd.detect(gray)
+    lines = detect_result[0] if isinstance(detect_result, tuple) else detect_result
+    line_segments = []
+    if lines is not None:
+        for raw in lines[:, 0, :]:
+            line_segments.append(
+                [
+                    float(raw[0]),
+                    float(raw[1]),
+                    float(raw[2]),
+                    float(raw[3]),
+                ]
+            )
+    duration_ms = int((time.time() - started_at) * 1000)
+    return {
+        "grayscale_image_data_url": encode_png_data_url(gray),
+        "line_segments": line_segments,
+        "width": int(gray.shape[1]),
+        "height": int(gray.shape[0]),
+        "duration_ms": duration_ms,
+    }
 
 
 def handle_mcv_cv_opencv_test(_args):
@@ -283,7 +250,7 @@ def api_mcv():
 
 
 @app.post("/api/mcv/pipeline")
-def api_mcv_pipeline_start():
+def api_mcv_pipeline():
     payload = request.get_json(silent=True) or {}
     args = payload.get("args") or {}
     image_data_url = args.get("image_data_url")
@@ -301,63 +268,23 @@ def api_mcv_pipeline_start():
             400,
         )
 
-    job_id = uuid.uuid4().hex
-    with PIPELINE_JOBS_LOCK:
-        PIPELINE_JOBS[job_id] = {
-            "queue": queue.Queue(),
-        }
-
-    worker = threading.Thread(target=run_pipeline_job, args=(job_id, args), daemon=True)
-    worker.start()
-    return jsonify({"ok": True, "data": {"job_id": job_id}})
-
-
-@app.get("/api/mcv/pipeline/<job_id>/events")
-def api_mcv_pipeline_events(job_id):
-    job = get_pipeline_job(job_id)
-    if not job:
+    try:
+        result = run_pipeline(args)
+    except Exception as exc:
         return (
             jsonify(
                 {
                     "ok": False,
                     "error": {
-                        "code": "UNKNOWN_JOB",
-                        "message": f"Unknown pipeline job: {job_id}",
+                        "code": "PIPELINE_ERROR",
+                        "message": str(exc),
                     },
                 }
             ),
-            404,
+            400,
         )
 
-    job_queue = job["queue"]
-
-    def event_stream():
-        try:
-            while True:
-                try:
-                    event_name, payload = job_queue.get(timeout=20.0)
-                except queue.Empty:
-                    yield ": keepalive\\n\\n"
-                    continue
-
-                if event_name == "_close":
-                    break
-
-                yield f"event: {event_name}\\ndata: {json.dumps(payload, separators=(',', ':'))}\\n\\n"
-                if event_name in ("complete", "pipeline_error"):
-                    break
-        finally:
-            with PIPELINE_JOBS_LOCK:
-                PIPELINE_JOBS.pop(job_id, None)
-
-    return Response(
-        event_stream(),
-        mimetype="text/event-stream",
-        headers={
-            "Cache-Control": "no-cache",
-            "X-Accel-Buffering": "no",
-        },
-    )
+    return jsonify({"ok": True, "data": result})
 
 
 @app.get("/")
