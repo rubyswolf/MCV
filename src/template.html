@@ -59,6 +59,12 @@ __MCV_BODY_STYLE__
     .search-input::placeholder {
       color: var(--muted);
     }
+    .media-error {
+      margin: 0 0 14px;
+      color: #ff9f9f;
+      min-height: 1.2em;
+      font-size: 0.92rem;
+    }
     .tab-button {
       background: #111821;
       color: var(--text);
@@ -163,6 +169,7 @@ __MCV_BODY_STYLE__
       <button id="tab-images" class="tab-button" type="button">Images</button>
     </div>
     <input id="media-search" class="search-input" type="text" placeholder="URL/search query" />
+    <div id="media-error" class="media-error"></div>
     <div id="media-box" class="media-box">loading...</div>
   </main>
 __BACKEND_SCRIPTS__

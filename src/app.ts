@@ -67,10 +67,18 @@ type MediaLibrary = {
   images: Record<string, MediaImageEntry>;
 };
 
+type SearchIntent = {
+  query: string;
+  parsedUrl: URL | null;
+  youtubeId: string | null;
+  normalizedUrl: string | null;
+};
+
 type SelectedMedia = {
   tab: MediaTab;
   id: string;
   item: MediaVideoEntry | MediaImageEntry;
+  timestampLabel?: string;
 };
 
 declare global {
@@ -93,6 +101,9 @@ let mediaLibrary: MediaLibrary = {
   videos: {},
   images: {},
 };
+
+const NO_YOUTUBE_VIDEO_ERROR =
+  "video is not provided by the Media API, please download the video yourself and upload it.";
 
 function isThenable(value: unknown): value is Promise<unknown> {
   return typeof value === "object" && value !== null && "then" in value;
@@ -266,6 +277,22 @@ function getMediaBoxNode(): HTMLDivElement | null {
   return document.getElementById("media-box") as HTMLDivElement | null;
 }
 
+function getMediaErrorNode(): HTMLDivElement | null {
+  return document.getElementById("media-error") as HTMLDivElement | null;
+}
+
+function setMediaError(message: string): void {
+  const errorNode = getMediaErrorNode();
+  if (!errorNode) {
+    return;
+  }
+  errorNode.textContent = message;
+}
+
+function clearMediaError(): void {
+  setMediaError("");
+}
+
 function setMediaMessage(message: string): void {
   const mediaBoxNode = getMediaBoxNode();
   if (!mediaBoxNode) {
@@ -346,6 +373,114 @@ function parseMediaLibrary(payload: unknown): MediaLibrary | null {
   };
 }
 
+function parseUrlOrNull(value: string): URL | null {
+  try {
+    return new URL(value);
+  } catch {
+    return null;
+  }
+}
+
+function isYoutubeUrl(url: URL): boolean {
+  const host = url.hostname.toLowerCase();
+  return (
+    host === "youtu.be" ||
+    host === "www.youtu.be" ||
+    host.endsWith("youtube.com")
+  );
+}
+
+function extractYoutubeId(url: URL): string | null {
+  const host = url.hostname.toLowerCase();
+  const pathParts = url.pathname.split("/").filter(Boolean);
+  let candidate = "";
+
+  if (host === "youtu.be" || host === "www.youtu.be") {
+    candidate = pathParts[0] || "";
+  } else if (host.endsWith("youtube.com")) {
+    if (url.pathname === "/watch") {
+      candidate = url.searchParams.get("v") || "";
+    } else if (pathParts.length >= 2 && ["shorts", "embed", "live", "v"].includes(pathParts[0])) {
+      candidate = pathParts[1] || "";
+    }
+  }
+
+  const trimmed = candidate.trim();
+  if (!trimmed) {
+    return null;
+  }
+  return /^[A-Za-z0-9_-]{6,}$/.test(trimmed) ? trimmed : null;
+}
+
+function parseTimestampSeconds(raw: string): number | null {
+  if (!raw) {
+    return null;
+  }
+  if (/^\d+$/.test(raw)) {
+    return Number(raw);
+  }
+  const match = raw.match(/^(?:(\d+)h)?(?:(\d+)m)?(?:(\d+)s?)?$/i);
+  if (!match) {
+    return null;
+  }
+  const hours = match[1] ? Number(match[1]) : 0;
+  const minutes = match[2] ? Number(match[2]) : 0;
+  const seconds = match[3] ? Number(match[3]) : 0;
+  const total = hours * 3600 + minutes * 60 + seconds;
+  return total > 0 ? total : null;
+}
+
+function formatTimestamp(seconds: number): string {
+  const hrs = Math.floor(seconds / 3600);
+  const mins = Math.floor((seconds % 3600) / 60);
+  const secs = seconds % 60;
+  if (hrs > 0) {
+    return `${hrs}:${String(mins).padStart(2, "0")}:${String(secs).padStart(2, "0")}`;
+  }
+  return `${mins}:${String(secs).padStart(2, "0")}`;
+}
+
+function extractYoutubeTimestampLabel(url: URL): string | undefined {
+  const raw = (url.searchParams.get("t") || "").trim();
+  if (!raw) {
+    return undefined;
+  }
+  const seconds = parseTimestampSeconds(raw);
+  if (seconds === null) {
+    return raw;
+  }
+  return formatTimestamp(seconds);
+}
+
+function findVideoByYoutubeId(youtubeId: string): { id: string; item: MediaVideoEntry } | null {
+  for (const [id, item] of Object.entries(mediaLibrary.videos)) {
+    if (id === youtubeId || item.youtube_id === youtubeId) {
+      return { id, item };
+    }
+  }
+  return null;
+}
+
+function findMediaByNormalizedUrl(normalizedUrl: string): SelectedMedia | null {
+  const tabOrder: MediaTab[] =
+    activeMediaTab === "videos" ? ["videos", "images"] : ["images", "videos"];
+
+  for (const tab of tabOrder) {
+    const entries =
+      tab === "videos"
+        ? Object.entries(mediaLibrary.videos)
+        : Object.entries(mediaLibrary.images);
+    for (const [id, item] of entries) {
+      const itemUrl = normalizePossibleUrl(item.url);
+      if (itemUrl && itemUrl === normalizedUrl) {
+        return { tab, id, item };
+      }
+    }
+  }
+
+  return null;
+}
+
 function setTabButtonState(): void {
   const videosButton = document.getElementById("tab-videos") as HTMLButtonElement | null;
   const imagesButton = document.getElementById("tab-images") as HTMLButtonElement | null;
@@ -359,6 +494,64 @@ function setTabButtonState(): void {
 
 function normalizeSearchToken(value: string): string {
   return value.trim().toLowerCase();
+}
+
+function normalizeUrlForMatch(url: URL): string {
+  const clone = new URL(url.toString());
+  clone.hash = "";
+  clone.searchParams.delete("t");
+  return clone.toString();
+}
+
+function parseSearchIntent(rawQuery: string): SearchIntent {
+  const query = rawQuery.trim();
+  const parsedUrl = parseUrlOrNull(query);
+  const youtubeId = parsedUrl && isYoutubeUrl(parsedUrl) ? extractYoutubeId(parsedUrl) : null;
+  const normalizedUrl = parsedUrl ? normalizeUrlForMatch(parsedUrl) : null;
+  return { query, parsedUrl, youtubeId, normalizedUrl };
+}
+
+function normalizePossibleUrl(value: string): string | null {
+  const parsed = parseUrlOrNull(value);
+  if (!parsed) {
+    return null;
+  }
+  return normalizeUrlForMatch(parsed);
+}
+
+function matchesMediaSearch(id: string, item: MediaVideoEntry | MediaImageEntry, tab: MediaTab): boolean {
+  const query = normalizeSearchToken(mediaSearchQuery);
+  if (!query) {
+    return true;
+  }
+
+  const intent = parseSearchIntent(mediaSearchQuery);
+
+  if (intent.youtubeId && tab === "videos") {
+    const videoItem = item as MediaVideoEntry;
+    if (id === intent.youtubeId || videoItem.youtube_id === intent.youtubeId) {
+      return true;
+    }
+  }
+
+  if (intent.normalizedUrl) {
+    const itemNormalizedUrl = normalizePossibleUrl(item.url);
+    if (itemNormalizedUrl && itemNormalizedUrl === intent.normalizedUrl) {
+      return true;
+    }
+    if (normalizeSearchToken(item.url).includes(query) || query.includes(normalizeSearchToken(item.url))) {
+      return true;
+    }
+  }
+
+  const haystack = [id, item.name, item.url];
+  if (tab === "videos") {
+    const videoItem = item as MediaVideoEntry;
+    if (videoItem.youtube_id) {
+      haystack.push(videoItem.youtube_id);
+    }
+  }
+  return haystack.some((value) => normalizeSearchToken(value).includes(query));
 }
 
 function matchesSearch(haystackValues: string[]): boolean {
@@ -380,15 +573,8 @@ function renderMediaList(): void {
       : Object.entries(mediaLibrary.images);
   const mediaEntries =
     activeMediaTab === "videos"
-      ? rawMediaEntries.filter(([id, item]) =>
-          matchesSearch([
-            id,
-            item.name,
-            item.url,
-            "youtube_id" in item && item.youtube_id ? item.youtube_id : "",
-          ])
-        )
-      : rawMediaEntries.filter(([id, item]) => matchesSearch([id, item.name, item.url]));
+      ? rawMediaEntries.filter(([id, item]) => matchesMediaSearch(id, item, "videos"))
+      : rawMediaEntries.filter(([id, item]) => matchesMediaSearch(id, item, "images"));
 
   if (mediaEntries.length === 0) {
     const hasQuery = normalizeSearchToken(mediaSearchQuery).length > 0;
@@ -412,6 +598,7 @@ function renderMediaList(): void {
     titleNode.className = "media-title-button";
     titleNode.textContent = item.name;
     titleNode.addEventListener("click", () => {
+      clearMediaError();
       selectedMedia = { tab: activeMediaTab, id, item };
       renderMediaBox();
     });
@@ -457,6 +644,12 @@ function renderSelectedMediaPlaceholder(): void {
   idNode.className = "selected-line";
   idNode.textContent = `ID: ${selectedMedia.id}`;
 
+  const timestampNode = document.createElement("div");
+  timestampNode.className = "selected-line";
+  if (selectedMedia.timestampLabel) {
+    timestampNode.textContent = `Timestamp: ${selectedMedia.timestampLabel}`;
+  }
+
   const urlNode = document.createElement("a");
   configureExternalLink(urlNode, selectedMedia.item.url, selectedMedia.item.url);
 
@@ -471,12 +664,19 @@ function renderSelectedMediaPlaceholder(): void {
 
   container.appendChild(titleNode);
   container.appendChild(idNode);
+  if (selectedMedia.timestampLabel) {
+    container.appendChild(timestampNode);
+  }
   container.appendChild(urlNode);
   container.appendChild(backButton);
   mediaBoxNode.replaceChildren(container);
 }
 
 function renderMediaBox(): void {
+  if (selectedMedia) {
+    renderSelectedMediaPlaceholder();
+    return;
+  }
   if (mediaLoadState === "no_api") {
     setMediaMessage("No Media API");
     return;
@@ -490,10 +690,6 @@ function renderMediaBox(): void {
     return;
   }
   if (mediaLoadState === "loaded") {
-    if (selectedMedia) {
-      renderSelectedMediaPlaceholder();
-      return;
-    }
     renderMediaList();
     return;
   }
@@ -503,6 +699,66 @@ function renderMediaBox(): void {
 function setActiveMediaTab(nextTab: MediaTab): void {
   activeMediaTab = nextTab;
   selectedMedia = null;
+  clearMediaError();
+  setTabButtonState();
+  renderMediaBox();
+}
+
+function handleSearchEnter(rawInput: string): void {
+  const trimmed = rawInput.trim();
+  if (!trimmed) {
+    return;
+  }
+
+  const url = parseUrlOrNull(trimmed);
+  if (!url) {
+    return;
+  }
+
+  clearMediaError();
+
+  if (isYoutubeUrl(url)) {
+    const youtubeId = extractYoutubeId(url);
+    if (!youtubeId) {
+      setMediaError(NO_YOUTUBE_VIDEO_ERROR);
+      return;
+    }
+    const foundVideo = findVideoByYoutubeId(youtubeId);
+    if (!foundVideo) {
+      setMediaError(NO_YOUTUBE_VIDEO_ERROR);
+      return;
+    }
+    activeMediaTab = "videos";
+    selectedMedia = {
+      tab: "videos",
+      id: foundVideo.id,
+      item: foundVideo.item,
+      timestampLabel: extractYoutubeTimestampLabel(url),
+    };
+    setTabButtonState();
+    renderMediaBox();
+    return;
+  }
+
+  const normalizedUrl = normalizeUrlForMatch(url);
+  const matchedMedia = findMediaByNormalizedUrl(normalizedUrl);
+  if (matchedMedia) {
+    activeMediaTab = matchedMedia.tab;
+    selectedMedia = matchedMedia;
+    setTabButtonState();
+    renderMediaBox();
+    return;
+  }
+
+  activeMediaTab = "videos";
+  selectedMedia = {
+    tab: "videos",
+    id: "raw-url",
+    item: {
+      name: "Direct Video URL",
+      url: url.toString(),
+    },
+  };
   setTabButtonState();
   renderMediaBox();
 }
@@ -524,7 +780,15 @@ function installUiHandlers(): void {
   if (searchInput) {
     searchInput.addEventListener("input", () => {
       mediaSearchQuery = searchInput.value;
+      clearMediaError();
       renderMediaBox();
+    });
+    searchInput.addEventListener("keydown", (event) => {
+      if (event.key !== "Enter") {
+        return;
+      }
+      event.preventDefault();
+      handleSearchEnter(searchInput.value);
     });
   }
 }
@@ -536,6 +800,7 @@ async function loadMediaLibrary(): Promise<void> {
     return;
   }
 
+  clearMediaError();
   mediaLoadState = "fetching";
   renderMediaBox();
 
