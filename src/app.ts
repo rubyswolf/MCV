@@ -28,6 +28,41 @@ type McvOpencvTestResult = {
   mean_gray: number;
 };
 
+type McvImagePipelineArgs = {
+  image_data_url: string;
+  canny_threshold1?: number;
+  canny_threshold2?: number;
+};
+
+type McvImagePipelineStageName = "grayscale" | "edges";
+
+type McvImagePipelineStageEvent = {
+  type: "stage";
+  stage: McvImagePipelineStageName;
+  image_data_url: string;
+  width: number;
+  height: number;
+};
+
+type McvImagePipelineDoneEvent = {
+  type: "done";
+  duration_ms?: number;
+};
+
+type McvImagePipelineErrorEvent = {
+  type: "error";
+  code: string;
+  message: string;
+  details?: unknown;
+};
+
+type McvImagePipelineEvent =
+  | McvImagePipelineStageEvent
+  | McvImagePipelineDoneEvent
+  | McvImagePipelineErrorEvent;
+
+type McvImagePipelineEventHandler = (event: McvImagePipelineEvent) => void;
+
 type McvMediaApi = {
   url: string;
   available: () => boolean;
@@ -44,6 +79,7 @@ type McvClientApi = {
   data: McvDataApi;
   mcv: {
     call: typeof callMcvApi;
+    runImagePipeline: typeof runImagePipeline;
     backend: "python" | "web";
   };
 };
@@ -193,6 +229,283 @@ async function getWebMcvRuntime(): Promise<any> {
   return cvPromise;
 }
 
+function emitImagePipelineEvent(
+  onEvent: McvImagePipelineEventHandler,
+  event: McvImagePipelineEvent
+): void {
+  onEvent(event);
+}
+
+async function decodeImageDataUrlToCanvas(dataUrl: string): Promise<HTMLCanvasElement> {
+  return await new Promise<HTMLCanvasElement>((resolve, reject) => {
+    const image = new Image();
+    image.decoding = "async";
+    image.onload = () => {
+      const width = image.naturalWidth || image.width;
+      const height = image.naturalHeight || image.height;
+      if (width <= 0 || height <= 0) {
+        reject(new Error("Decoded image has invalid dimensions"));
+        return;
+      }
+      const canvas = document.createElement("canvas");
+      canvas.width = width;
+      canvas.height = height;
+      const ctx = canvas.getContext("2d");
+      if (!ctx) {
+        reject(new Error("Canvas context unavailable"));
+        return;
+      }
+      ctx.drawImage(image, 0, 0, width, height);
+      resolve(canvas);
+    };
+    image.onerror = () => {
+      reject(new Error("Failed to decode image_data_url"));
+    };
+    image.src = dataUrl;
+  });
+}
+
+function grayMatToPngDataUrl(cv: any, grayMat: any): string {
+  const rgba = new cv.Mat();
+  try {
+    cv.cvtColor(grayMat, rgba, cv.COLOR_GRAY2RGBA);
+    const width = Number(rgba.cols);
+    const height = Number(rgba.rows);
+    const canvas = document.createElement("canvas");
+    canvas.width = width;
+    canvas.height = height;
+    const ctx = canvas.getContext("2d");
+    if (!ctx) {
+      throw new Error("Canvas context unavailable");
+    }
+    const dataCopy = new Uint8ClampedArray(rgba.data);
+    const imageData = new ImageData(dataCopy, width, height);
+    ctx.putImageData(imageData, 0, 0);
+    return canvas.toDataURL("image/png");
+  } finally {
+    rgba.delete();
+  }
+}
+
+function sanitizeCannyThreshold(value: unknown, fallback: number): number {
+  if (typeof value !== "number" || !Number.isFinite(value)) {
+    return fallback;
+  }
+  if (value < 0) {
+    return 0;
+  }
+  return value;
+}
+
+async function runWebImagePipeline(
+  args: McvImagePipelineArgs,
+  onEvent: McvImagePipelineEventHandler
+): Promise<void> {
+  const cv = await getWebMcvRuntime();
+  let srcRgba: any = null;
+  let gray: any = null;
+  let edges: any = null;
+  try {
+    const canvas = await decodeImageDataUrlToCanvas(args.image_data_url);
+    const ctx = canvas.getContext("2d");
+    if (!ctx) {
+      throw new Error("Canvas context unavailable");
+    }
+    const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
+    srcRgba = new cv.Mat(canvas.height, canvas.width, cv.CV_8UC4);
+    srcRgba.data.set(imageData.data);
+
+    gray = new cv.Mat();
+    cv.cvtColor(srcRgba, gray, cv.COLOR_RGBA2GRAY);
+    emitImagePipelineEvent(onEvent, {
+      type: "stage",
+      stage: "grayscale",
+      image_data_url: grayMatToPngDataUrl(cv, gray),
+      width: Number(gray.cols),
+      height: Number(gray.rows),
+    });
+
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    const threshold1 = sanitizeCannyThreshold(args.canny_threshold1, 80);
+    const threshold2 = sanitizeCannyThreshold(args.canny_threshold2, 160);
+    edges = new cv.Mat();
+    cv.Canny(gray, edges, threshold1, threshold2);
+    emitImagePipelineEvent(onEvent, {
+      type: "stage",
+      stage: "edges",
+      image_data_url: grayMatToPngDataUrl(cv, edges),
+      width: Number(edges.cols),
+      height: Number(edges.rows),
+    });
+    emitImagePipelineEvent(onEvent, { type: "done" });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    emitImagePipelineEvent(onEvent, {
+      type: "error",
+      code: "WEB_PIPELINE_ERROR",
+      message,
+      details: String(error),
+    });
+    throw error;
+  } finally {
+    if (edges) {
+      edges.delete();
+    }
+    if (gray) {
+      gray.delete();
+    }
+    if (srcRgba) {
+      srcRgba.delete();
+    }
+  }
+}
+
+type PythonPipelineStartResponse = {
+  ok: boolean;
+  data?: {
+    job_id?: string;
+  };
+  error?: {
+    code?: string;
+    message?: string;
+    details?: unknown;
+  };
+};
+
+async function runPythonImagePipeline(
+  args: McvImagePipelineArgs,
+  onEvent: McvImagePipelineEventHandler
+): Promise<void> {
+  const startResponse = await fetch("/api/mcv/pipeline", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ args }),
+  });
+  if (!startResponse.ok) {
+    const message = `HTTP ${startResponse.status}`;
+    emitImagePipelineEvent(onEvent, {
+      type: "error",
+      code: "HTTP_ERROR",
+      message,
+    });
+    throw new Error(message);
+  }
+
+  const startPayload = (await startResponse.json()) as PythonPipelineStartResponse;
+  if (!startPayload.ok || !startPayload.data?.job_id) {
+    const message = startPayload.error?.message || "Pipeline start failed";
+    emitImagePipelineEvent(onEvent, {
+      type: "error",
+      code: startPayload.error?.code || "PIPELINE_START_FAILED",
+      message,
+      details: startPayload.error?.details,
+    });
+    throw new Error(message);
+  }
+
+  const jobId = startPayload.data.job_id;
+
+  await new Promise<void>((resolve, reject) => {
+    const streamUrl = `/api/mcv/pipeline/${encodeURIComponent(jobId)}/events`;
+    const stream = new EventSource(streamUrl);
+
+    const closeWithError = (errorCode: string, message: string, details?: unknown) => {
+      emitImagePipelineEvent(onEvent, {
+        type: "error",
+        code: errorCode,
+        message,
+        details,
+      });
+      stream.close();
+      reject(new Error(message));
+    };
+
+    stream.addEventListener("stage", (event) => {
+      try {
+        const parsed = JSON.parse((event as MessageEvent).data || "{}") as {
+          stage?: unknown;
+          image_data_url?: unknown;
+          width?: unknown;
+          height?: unknown;
+        };
+        if (parsed.stage !== "grayscale" && parsed.stage !== "edges") {
+          return;
+        }
+        if (typeof parsed.image_data_url !== "string") {
+          return;
+        }
+        emitImagePipelineEvent(onEvent, {
+          type: "stage",
+          stage: parsed.stage,
+          image_data_url: parsed.image_data_url,
+          width: typeof parsed.width === "number" ? parsed.width : 0,
+          height: typeof parsed.height === "number" ? parsed.height : 0,
+        });
+      } catch (error) {
+        closeWithError("PIPELINE_STREAM_PARSE_ERROR", "Failed to parse stage event", String(error));
+      }
+    });
+
+    stream.addEventListener("complete", (event) => {
+      try {
+        const parsed = JSON.parse((event as MessageEvent).data || "{}") as { duration_ms?: unknown };
+        emitImagePipelineEvent(onEvent, {
+          type: "done",
+          duration_ms: typeof parsed.duration_ms === "number" ? parsed.duration_ms : undefined,
+        });
+        stream.close();
+        resolve();
+      } catch (error) {
+        closeWithError("PIPELINE_STREAM_PARSE_ERROR", "Failed to parse completion event", String(error));
+      }
+    });
+
+    stream.addEventListener("pipeline_error", (event) => {
+      try {
+        const parsed = JSON.parse((event as MessageEvent).data || "{}") as {
+          code?: unknown;
+          message?: unknown;
+          details?: unknown;
+        };
+        closeWithError(
+          typeof parsed.code === "string" ? parsed.code : "PIPELINE_ERROR",
+          typeof parsed.message === "string" ? parsed.message : "Pipeline processing failed",
+          parsed.details
+        );
+      } catch (error) {
+        closeWithError("PIPELINE_ERROR", "Pipeline processing failed", String(error));
+      }
+    });
+
+    stream.onerror = () => {
+      closeWithError("PIPELINE_STREAM_ERROR", "Pipeline stream connection failed");
+    };
+  });
+}
+
+async function runImagePipeline(
+  args: McvImagePipelineArgs,
+  onEvent: McvImagePipelineEventHandler
+): Promise<void> {
+  if (!args || typeof args.image_data_url !== "string" || !args.image_data_url.trim()) {
+    const message = "image_data_url is required";
+    emitImagePipelineEvent(onEvent, {
+      type: "error",
+      code: "INVALID_ARGS",
+      message,
+    });
+    throw new Error(message);
+  }
+
+  if (__MCV_BACKEND__ === "web") {
+    await runWebImagePipeline(args, onEvent);
+    return;
+  }
+
+  await runPythonImagePipeline(args, onEvent);
+}
+
 async function callMcvApi<TData>(requestBody: McvRequest): Promise<McvResponse<TData>> {
   if (__MCV_BACKEND__ === "web") {
     if (requestBody.op !== "cv.opencvTest") {
@@ -293,6 +606,7 @@ function installGlobalApi(): void {
     },
     mcv: {
       call: callMcvApi,
+      runImagePipeline: runImagePipeline,
       backend: __MCV_BACKEND__,
     },
   };

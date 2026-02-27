@@ -100,6 +100,12 @@ function renderPythonStandaloneScript(inlineHtml, requirementsText) {
   return `#!/usr/bin/env python3
 import sys
 from pathlib import Path
+import base64
+import json
+import queue
+import threading
+import time
+import uuid
 
 REQUIREMENTS_FILENAME = "mcv-requirements.txt"
 REQUIREMENTS_TEXT = ${requirementsAsPythonString}
@@ -136,6 +142,101 @@ except ImportError as exc:
 HTML_PAGE = ${htmlAsPythonString}
 
 app = Flask(__name__)
+PIPELINE_JOBS = {}
+PIPELINE_JOBS_LOCK = threading.Lock()
+
+
+def parse_positive_float(value, default_value):
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError):
+        return float(default_value)
+    if parsed < 0:
+        return 0.0
+    return parsed
+
+
+def decode_image_data_url_to_bgr(image_data_url):
+    if not isinstance(image_data_url, str) or "," not in image_data_url:
+        raise ValueError("Invalid image_data_url")
+    header, encoded = image_data_url.split(",", 1)
+    if ";base64" not in header:
+        raise ValueError("image_data_url must be base64 encoded")
+    try:
+        raw_bytes = base64.b64decode(encoded, validate=True)
+    except Exception as exc:
+        raise ValueError("Invalid image_data_url base64 payload") from exc
+    buffer = np.frombuffer(raw_bytes, dtype=np.uint8)
+    image_bgr = cv2.imdecode(buffer, cv2.IMREAD_COLOR)
+    if image_bgr is None:
+        raise ValueError("Could not decode image data")
+    return image_bgr
+
+
+def encode_png_data_url(image):
+    ok, encoded = cv2.imencode(".png", image)
+    if not ok:
+        raise ValueError("Failed to encode PNG")
+    payload = base64.b64encode(encoded.tobytes()).decode("ascii")
+    return f"data:image/png;base64,{payload}"
+
+
+def get_pipeline_job(job_id):
+    with PIPELINE_JOBS_LOCK:
+        return PIPELINE_JOBS.get(job_id)
+
+
+def put_pipeline_event(job_id, event_name, payload):
+    job = get_pipeline_job(job_id)
+    if not job:
+        return
+    job["queue"].put((event_name, payload))
+
+
+def run_pipeline_job(job_id, args):
+    started_at = time.time()
+    try:
+        image_data_url = args.get("image_data_url")
+        image_bgr = decode_image_data_url_to_bgr(image_data_url)
+        gray = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2GRAY)
+        put_pipeline_event(
+            job_id,
+            "stage",
+            {
+                "stage": "grayscale",
+                "image_data_url": encode_png_data_url(gray),
+                "width": int(gray.shape[1]),
+                "height": int(gray.shape[0]),
+            },
+        )
+
+        threshold1 = parse_positive_float(args.get("canny_threshold1"), 80.0)
+        threshold2 = parse_positive_float(args.get("canny_threshold2"), 160.0)
+        edges = cv2.Canny(gray, threshold1=threshold1, threshold2=threshold2)
+        put_pipeline_event(
+            job_id,
+            "stage",
+            {
+                "stage": "edges",
+                "image_data_url": encode_png_data_url(edges),
+                "width": int(edges.shape[1]),
+                "height": int(edges.shape[0]),
+            },
+        )
+
+        duration_ms = int((time.time() - started_at) * 1000)
+        put_pipeline_event(job_id, "complete", {"duration_ms": duration_ms})
+    except Exception as exc:
+        put_pipeline_event(
+            job_id,
+            "pipeline_error",
+            {
+                "code": "PIPELINE_ERROR",
+                "message": str(exc),
+            },
+        )
+    finally:
+        put_pipeline_event(job_id, "_close", {})
 
 
 def handle_mcv_cv_opencv_test(_args):
@@ -178,6 +279,84 @@ def api_mcv():
             }
         ),
         400,
+    )
+
+
+@app.post("/api/mcv/pipeline")
+def api_mcv_pipeline_start():
+    payload = request.get_json(silent=True) or {}
+    args = payload.get("args") or {}
+    image_data_url = args.get("image_data_url")
+    if not isinstance(image_data_url, str) or not image_data_url.strip():
+        return (
+            jsonify(
+                {
+                    "ok": False,
+                    "error": {
+                        "code": "INVALID_ARGS",
+                        "message": "image_data_url is required",
+                    },
+                }
+            ),
+            400,
+        )
+
+    job_id = uuid.uuid4().hex
+    with PIPELINE_JOBS_LOCK:
+        PIPELINE_JOBS[job_id] = {
+            "queue": queue.Queue(),
+        }
+
+    worker = threading.Thread(target=run_pipeline_job, args=(job_id, args), daemon=True)
+    worker.start()
+    return jsonify({"ok": True, "data": {"job_id": job_id}})
+
+
+@app.get("/api/mcv/pipeline/<job_id>/events")
+def api_mcv_pipeline_events(job_id):
+    job = get_pipeline_job(job_id)
+    if not job:
+        return (
+            jsonify(
+                {
+                    "ok": False,
+                    "error": {
+                        "code": "UNKNOWN_JOB",
+                        "message": f"Unknown pipeline job: {job_id}",
+                    },
+                }
+            ),
+            404,
+        )
+
+    job_queue = job["queue"]
+
+    def event_stream():
+        try:
+            while True:
+                try:
+                    event_name, payload = job_queue.get(timeout=20.0)
+                except queue.Empty:
+                    yield ": keepalive\\n\\n"
+                    continue
+
+                if event_name == "_close":
+                    break
+
+                yield f"event: {event_name}\\ndata: {json.dumps(payload, separators=(',', ':'))}\\n\\n"
+                if event_name in ("complete", "pipeline_error"):
+                    break
+        finally:
+            with PIPELINE_JOBS_LOCK:
+                PIPELINE_JOBS.pop(job_id, None)
+
+    return Response(
+        event_stream(),
+        mimetype="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",
+        },
     )
 
 
