@@ -48,7 +48,7 @@ type McvClientApi = {
   };
 };
 
-type MediaTab = "videos" | "images";
+type MediaTab = "videos" | "images" | "upload";
 type MediaLoadState = "loading" | "no_api" | "fetching" | "failed" | "loaded";
 
 type MediaVideoEntry = {
@@ -74,11 +74,25 @@ type SearchIntent = {
   normalizedUrl: string | null;
 };
 
-type SelectedMedia = {
+type MediaKind = "video" | "image";
+
+type ViewerMedia = {
   tab: MediaTab;
   id: string;
-  item: MediaVideoEntry | MediaImageEntry;
+  kind: MediaKind;
+  title: string;
+  url: string;
+  youtubeId?: string;
   timestampLabel?: string;
+  initialSeekSeconds?: number;
+  isObjectUrl?: boolean;
+};
+
+type LaunchSelectionIntent = {
+  mode: "id" | "yt";
+  value: string;
+  tRaw: string;
+  fRaw: string;
 };
 
 declare global {
@@ -96,7 +110,13 @@ let cvPromise: Promise<unknown> | null = null;
 let activeMediaTab: MediaTab = "videos";
 let mediaLoadState: MediaLoadState = "loading";
 let mediaSearchQuery = "";
-let selectedMedia: SelectedMedia | null = null;
+let selectedUploadFilename = "";
+let viewerMedia: ViewerMedia | null = null;
+let currentViewerObjectUrl: string | null = null;
+let viewerVideoNode: HTMLVideoElement | null = null;
+let viewerHmsInput: HTMLInputElement | null = null;
+let viewerEditingField: "hms" | null = null;
+let launchSelectionIntent: LaunchSelectionIntent | null = null;
 let mediaLibrary: MediaLibrary = {
   videos: {},
   images: {},
@@ -104,6 +124,8 @@ let mediaLibrary: MediaLibrary = {
 
 const NO_YOUTUBE_VIDEO_ERROR =
   "video is not provided by the Media API, please download the video yourself and upload it.";
+const NO_MEDIA_ID_ERROR = "media ID is not provided by the Media API.";
+const VIEWER_FPS = 30;
 
 function isThenable(value: unknown): value is Promise<unknown> {
   return typeof value === "object" && value !== null && "then" in value;
@@ -281,6 +303,22 @@ function getMediaErrorNode(): HTMLDivElement | null {
   return document.getElementById("media-error") as HTMLDivElement | null;
 }
 
+function getSelectorScreenNode(): HTMLDivElement | null {
+  return document.getElementById("selector-screen") as HTMLDivElement | null;
+}
+
+function getViewerScreenNode(): HTMLDivElement | null {
+  return document.getElementById("viewer-screen") as HTMLDivElement | null;
+}
+
+function getViewerTitleNode(): HTMLHeadingElement | null {
+  return document.getElementById("viewer-title") as HTMLHeadingElement | null;
+}
+
+function getViewerContentNode(): HTMLDivElement | null {
+  return document.getElementById("viewer-content") as HTMLDivElement | null;
+}
+
 function setMediaError(message: string): void {
   const errorNode = getMediaErrorNode();
   if (!errorNode) {
@@ -299,6 +337,24 @@ function setMediaMessage(message: string): void {
     return;
   }
   mediaBoxNode.textContent = message;
+}
+
+function revokeViewerObjectUrl(): void {
+  if (currentViewerObjectUrl) {
+    URL.revokeObjectURL(currentViewerObjectUrl);
+    currentViewerObjectUrl = null;
+  }
+}
+
+function setViewerMode(isViewerVisible: boolean): void {
+  const selectorScreen = getSelectorScreenNode();
+  const viewerScreen = getViewerScreenNode();
+  if (selectorScreen) {
+    selectorScreen.classList.toggle("hidden", isViewerVisible);
+  }
+  if (viewerScreen) {
+    viewerScreen.classList.toggle("hidden", !isViewerVisible);
+  }
 }
 
 function configureExternalLink(node: HTMLAnchorElement, url: string, label: string): void {
@@ -413,13 +469,33 @@ function extractYoutubeId(url: URL): string | null {
 }
 
 function parseTimestampSeconds(raw: string): number | null {
-  if (!raw) {
+  const value = raw.trim();
+  if (!value) {
     return null;
   }
-  if (/^\d+$/.test(raw)) {
-    return Number(raw);
+  if (/^\d+(\.\d+)?$/.test(value)) {
+    return Number(value);
   }
-  const match = raw.match(/^(?:(\d+)h)?(?:(\d+)m)?(?:(\d+)s?)?$/i);
+  if (value.includes(":")) {
+    const parts = value.split(":").map((part) => part.trim());
+    if (parts.some((part) => !part)) {
+      return null;
+    }
+    if (parts.length < 2 || parts.length > 3) {
+      return null;
+    }
+    const numeric = parts.map((part) => Number(part));
+    if (numeric.some((part) => Number.isNaN(part) || part < 0)) {
+      return null;
+    }
+    if (parts.length === 2) {
+      const [minutes, seconds] = numeric;
+      return minutes * 60 + seconds;
+    }
+    const [hours, minutes, seconds] = numeric;
+    return hours * 3600 + minutes * 60 + seconds;
+  }
+  const match = value.match(/^(?:(\d+)h)?(?:(\d+)m)?(?:(\d+(?:\.\d+)?)s?)?$/i);
   if (!match) {
     return null;
   }
@@ -431,9 +507,10 @@ function parseTimestampSeconds(raw: string): number | null {
 }
 
 function formatTimestamp(seconds: number): string {
-  const hrs = Math.floor(seconds / 3600);
-  const mins = Math.floor((seconds % 3600) / 60);
-  const secs = seconds % 60;
+  const wholeSeconds = Math.max(0, Math.floor(seconds));
+  const hrs = Math.floor(wholeSeconds / 3600);
+  const mins = Math.floor((wholeSeconds % 3600) / 60);
+  const secs = wholeSeconds % 60;
   if (hrs > 0) {
     return `${hrs}:${String(mins).padStart(2, "0")}:${String(secs).padStart(2, "0")}`;
   }
@@ -461,7 +538,175 @@ function findVideoByYoutubeId(youtubeId: string): { id: string; item: MediaVideo
   return null;
 }
 
-function findMediaByNormalizedUrl(normalizedUrl: string): SelectedMedia | null {
+function findMediaById(id: string): ViewerMedia | null {
+  if (mediaLibrary.videos[id]) {
+    const video = mediaLibrary.videos[id];
+    return {
+      tab: "videos",
+      id,
+      kind: "video",
+      title: video.name,
+      url: video.url,
+      youtubeId: video.youtube_id,
+    };
+  }
+  if (mediaLibrary.images[id]) {
+    const image = mediaLibrary.images[id];
+    return {
+      tab: "images",
+      id,
+      kind: "image",
+      title: image.name,
+      url: image.url,
+    };
+  }
+  return null;
+}
+
+function parseLaunchSelectionIntent(): LaunchSelectionIntent | null {
+  const candidates: string[] = [];
+
+  const pushCandidate = (value: string | null | undefined) => {
+    if (!value) {
+      return;
+    }
+    const trimmed = value.trim();
+    if (!trimmed) {
+      return;
+    }
+    candidates.push(trimmed);
+  };
+
+  pushCandidate(window.location.search);
+  pushCandidate(window.location.hash.startsWith("#") ? window.location.hash.slice(1) : window.location.hash);
+
+  try {
+    if (window.parent && window.parent !== window) {
+      pushCandidate(window.parent.location.search);
+      pushCandidate(
+        window.parent.location.hash.startsWith("#")
+          ? window.parent.location.hash.slice(1)
+          : window.parent.location.hash
+      );
+    }
+  } catch {
+    // Cross-origin parent access can fail; ignore and continue with local params.
+  }
+
+  try {
+    if (window.top && window.top !== window && window.top !== window.parent) {
+      pushCandidate(window.top.location.search);
+      pushCandidate(
+        window.top.location.hash.startsWith("#")
+          ? window.top.location.hash.slice(1)
+          : window.top.location.hash
+      );
+    }
+  } catch {
+    // Cross-origin top access can fail; ignore and continue with available params.
+  }
+
+  for (const candidate of candidates) {
+    const normalized = candidate.startsWith("?")
+      ? candidate.slice(1)
+      : candidate.startsWith("#")
+        ? candidate.slice(1)
+        : candidate;
+    const queryPart = normalized.includes("?")
+      ? normalized.slice(normalized.indexOf("?") + 1)
+      : normalized;
+    const params = new URLSearchParams(queryPart);
+    const idValue = (params.get("id") || "").trim();
+    const ytValue = (params.get("yt") || "").trim();
+    const tRaw = (params.get("t") || "").trim();
+    const fRaw = (params.get("f") || "").trim();
+
+    if (idValue) {
+      return { mode: "id", value: idValue, tRaw, fRaw };
+    }
+    if (ytValue) {
+      return { mode: "yt", value: ytValue, tRaw, fRaw };
+    }
+  }
+
+  return null;
+}
+
+function buildLaunchSeekInfo(intent: LaunchSelectionIntent): {
+  initialSeekSeconds?: number;
+  timestampLabel?: string;
+} {
+  const hasT = intent.tRaw.length > 0;
+  const hasF = intent.fRaw.length > 0;
+  if (!hasT && !hasF) {
+    return {};
+  }
+
+  const parsedT = hasT ? parseTimestampSeconds(intent.tRaw) : 0;
+  if (parsedT === null) {
+    return {};
+  }
+
+  let frame = 0;
+  if (hasF) {
+    if (!/^\d+$/.test(intent.fRaw)) {
+      return { initialSeekSeconds: Math.max(0, parsedT), timestampLabel: `${intent.tRaw || "0"}|0` };
+    }
+    frame = Math.max(0, Number(intent.fRaw));
+  }
+
+  const initialSeekSeconds = Math.max(0, parsedT) + frame / VIEWER_FPS;
+  const displayFrame = frame % VIEWER_FPS;
+  const displaySeconds = Math.max(0, Math.floor(parsedT + Math.floor(frame / VIEWER_FPS)));
+  const timestampLabel = `${formatTimestamp(displaySeconds)}|${displayFrame}`;
+  return { initialSeekSeconds, timestampLabel };
+}
+
+function applyLaunchSelectionIfAny(): void {
+  if (!launchSelectionIntent) {
+    return;
+  }
+  const intent = launchSelectionIntent;
+  launchSelectionIntent = null;
+
+  let target: ViewerMedia | null = null;
+  if (intent.mode === "id") {
+    target = findMediaById(intent.value);
+    if (!target) {
+      setMediaError(NO_MEDIA_ID_ERROR);
+      return;
+    }
+  } else {
+    const foundVideo = findVideoByYoutubeId(intent.value);
+    if (!foundVideo) {
+      setMediaError(NO_YOUTUBE_VIDEO_ERROR);
+      return;
+    }
+    target = {
+      tab: "videos",
+      id: foundVideo.id,
+      kind: "video",
+      title: foundVideo.item.name,
+      url: foundVideo.item.url,
+      youtubeId: foundVideo.item.youtube_id,
+    };
+  }
+
+  const seekInfo = buildLaunchSeekInfo(intent);
+  if (seekInfo.initialSeekSeconds !== undefined) {
+    target.initialSeekSeconds = seekInfo.initialSeekSeconds;
+  }
+  if (seekInfo.timestampLabel) {
+    target.timestampLabel = seekInfo.timestampLabel;
+  }
+
+  activeMediaTab = target.tab;
+  clearMediaError();
+  setTabButtonState();
+  openViewer(target);
+}
+
+function findMediaByNormalizedUrl(normalizedUrl: string): ViewerMedia | null {
   const tabOrder: MediaTab[] =
     activeMediaTab === "videos" ? ["videos", "images"] : ["images", "videos"];
 
@@ -473,7 +718,16 @@ function findMediaByNormalizedUrl(normalizedUrl: string): SelectedMedia | null {
     for (const [id, item] of entries) {
       const itemUrl = normalizePossibleUrl(item.url);
       if (itemUrl && itemUrl === normalizedUrl) {
-        return { tab, id, item };
+        return {
+          tab,
+          id,
+          kind: tab === "videos" ? "video" : "image",
+          title: item.name,
+          url: item.url,
+          ...(tab === "videos" && "youtube_id" in item && item.youtube_id
+            ? { youtubeId: item.youtube_id }
+            : {}),
+        };
       }
     }
   }
@@ -484,12 +738,16 @@ function findMediaByNormalizedUrl(normalizedUrl: string): SelectedMedia | null {
 function setTabButtonState(): void {
   const videosButton = document.getElementById("tab-videos") as HTMLButtonElement | null;
   const imagesButton = document.getElementById("tab-images") as HTMLButtonElement | null;
-  if (!videosButton || !imagesButton) {
+  const uploadButton = document.getElementById("tab-upload") as HTMLButtonElement | null;
+  if (!videosButton || !imagesButton || !uploadButton) {
     return;
   }
   const isVideos = activeMediaTab === "videos";
+  const isImages = activeMediaTab === "images";
+  const isUpload = activeMediaTab === "upload";
   videosButton.classList.toggle("active", isVideos);
-  imagesButton.classList.toggle("active", !isVideos);
+  imagesButton.classList.toggle("active", isImages);
+  uploadButton.classList.toggle("active", isUpload);
 }
 
 function normalizeSearchToken(value: string): string {
@@ -554,12 +812,353 @@ function matchesMediaSearch(id: string, item: MediaVideoEntry | MediaImageEntry,
   return haystack.some((value) => normalizeSearchToken(value).includes(query));
 }
 
-function matchesSearch(haystackValues: string[]): boolean {
-  const query = normalizeSearchToken(mediaSearchQuery);
-  if (!query) {
-    return true;
+function inferMediaKindFromUrl(url: URL): MediaKind {
+  const pathname = url.pathname.toLowerCase();
+  if (/\.(png|jpg|jpeg|gif|webp|bmp|svg|avif)$/.test(pathname)) {
+    return "image";
   }
-  return haystackValues.some((value) => normalizeSearchToken(value).includes(query));
+  if (/\.(mp4|webm|mov|m4v|ogv|mkv)$/.test(pathname)) {
+    return "video";
+  }
+  return "video";
+}
+
+function inferMediaKindFromFile(file: File): MediaKind {
+  if (file.type.startsWith("image/")) {
+    return "image";
+  }
+  if (file.type.startsWith("video/")) {
+    return "video";
+  }
+  const fakeUrl = parseUrlOrNull(`https://local.invalid/${encodeURIComponent(file.name)}`);
+  return fakeUrl ? inferMediaKindFromUrl(fakeUrl) : "video";
+}
+
+function clampVideoTime(video: HTMLVideoElement, seconds: number): number {
+  if (!Number.isFinite(seconds) || seconds < 0) {
+    return 0;
+  }
+  if (Number.isFinite(video.duration) && video.duration > 0) {
+    return Math.min(seconds, video.duration);
+  }
+  return seconds;
+}
+
+function syncViewerTimeInputs(force = false): void {
+  if (!viewerVideoNode || !viewerHmsInput) {
+    return;
+  }
+  if (!force && viewerEditingField) {
+    return;
+  }
+  const current = Number.isFinite(viewerVideoNode.currentTime) ? viewerVideoNode.currentTime : 0;
+  const safe = Math.max(0, current);
+  const wholeSeconds = Math.floor(safe);
+  const fractional = safe - wholeSeconds;
+  const frame = Math.min(VIEWER_FPS - 1, Math.floor(fractional * VIEWER_FPS));
+  viewerHmsInput.value = `${formatTimestamp(wholeSeconds)}|${frame}`;
+}
+
+function parseFrameSuffix(raw: string): { base: string; frame: number } | null {
+  const trimmed = raw.trim();
+  if (!trimmed) {
+    return null;
+  }
+  const pipeIndex = trimmed.lastIndexOf("|");
+  if (pipeIndex < 0) {
+    return { base: trimmed, frame: 0 };
+  }
+  const base = trimmed.slice(0, pipeIndex).trim();
+  const frameRaw = trimmed.slice(pipeIndex + 1).trim();
+  if (!base) {
+    return null;
+  }
+  if (!/^\d+$/.test(frameRaw)) {
+    return null;
+  }
+  const frame = Number(frameRaw);
+  if (!Number.isFinite(frame) || frame < 0) {
+    return null;
+  }
+  return { base, frame };
+}
+
+function seekViewerFromInput(): void {
+  if (!viewerVideoNode || !viewerHmsInput) {
+    return;
+  }
+  const rawValue = viewerHmsInput.value;
+  const parsedWithFrame = parseFrameSuffix(rawValue);
+  if (!parsedWithFrame) {
+    return;
+  }
+  const baseSeconds = parseTimestampSeconds(parsedWithFrame.base);
+  if (baseSeconds === null) {
+    return;
+  }
+  const normalizedFrame = Math.min(parsedWithFrame.frame, VIEWER_FPS - 1);
+  const targetSeconds = Math.max(0, baseSeconds) + normalizedFrame / VIEWER_FPS;
+  viewerVideoNode.currentTime = clampVideoTime(viewerVideoNode, targetSeconds);
+}
+
+function getCurrentViewerTimeParts(): { seconds: number; frame: number } {
+  if (!viewerVideoNode || !viewerMedia || viewerMedia.kind !== "video") {
+    return { seconds: 0, frame: 0 };
+  }
+  const safeTime = Math.max(0, Number.isFinite(viewerVideoNode.currentTime) ? viewerVideoNode.currentTime : 0);
+  const wholeSeconds = Math.floor(safeTime);
+  const fractional = safeTime - wholeSeconds;
+  const frame = Math.max(0, Math.min(VIEWER_FPS - 1, Math.floor(fractional * VIEWER_FPS + 1e-6)));
+  return { seconds: wholeSeconds, frame };
+}
+
+function getShareBaseUrl(): URL {
+  const candidates: Array<() => string> = [
+    () => window.top?.location.href ?? "",
+    () => window.parent?.location.href ?? "",
+    () => window.location.href,
+  ];
+  for (const getHref of candidates) {
+    try {
+      const href = getHref();
+      if (!href) {
+        continue;
+      }
+      return new URL(href);
+    } catch {
+      // Ignore inaccessible cross-origin frames and invalid URL values.
+    }
+  }
+  return new URL(window.location.href);
+}
+
+function buildViewerShareUrl(): string | null {
+  if (!viewerMedia) {
+    return null;
+  }
+  const shareUrl = getShareBaseUrl();
+  shareUrl.hash = "";
+  shareUrl.search = "";
+
+  const { seconds, frame } = getCurrentViewerTimeParts();
+  const preferredId =
+    viewerMedia.id && viewerMedia.id !== "raw-url" && viewerMedia.id !== "upload-file"
+      ? viewerMedia.id
+      : "";
+  if (preferredId) {
+    shareUrl.searchParams.set("id", preferredId);
+  } else if (viewerMedia.youtubeId) {
+    shareUrl.searchParams.set("yt", viewerMedia.youtubeId);
+  } else {
+    return null;
+  }
+  shareUrl.searchParams.set("t", String(seconds));
+  shareUrl.searchParams.set("f", String(frame));
+  return shareUrl.toString();
+}
+
+async function copyViewerShareLink(copyButton: HTMLButtonElement | null): Promise<void> {
+  const originalLabel = copyButton?.textContent || "Copy link";
+  const setLabel = (label: string) => {
+    if (copyButton) {
+      copyButton.textContent = label;
+    }
+  };
+  const resetLabelSoon = () => {
+    window.setTimeout(() => {
+      setLabel(originalLabel);
+    }, 1200);
+  };
+
+  const shareUrl = buildViewerShareUrl();
+  if (!shareUrl) {
+    setLabel("No share ID");
+    resetLabelSoon();
+    return;
+  }
+
+  try {
+    await navigator.clipboard.writeText(shareUrl);
+    setLabel("Copied");
+  } catch {
+    setLabel("Copy failed");
+  }
+  resetLabelSoon();
+}
+
+function buildViewerYoutubeUrl(): string | null {
+  if (!viewerMedia?.youtubeId) {
+    return null;
+  }
+  const { seconds } = getCurrentViewerTimeParts();
+  const ytUrl = new URL("https://www.youtube.com/watch");
+  ytUrl.searchParams.set("v", viewerMedia.youtubeId);
+  ytUrl.searchParams.set("t", String(seconds));
+  return ytUrl.toString();
+}
+
+function openViewerInYoutube(): void {
+  const ytUrl = buildViewerYoutubeUrl();
+  if (!ytUrl) {
+    return;
+  }
+  window.open(ytUrl, "_blank", "noopener,noreferrer");
+}
+
+function closeViewer(): void {
+  viewerMedia = null;
+  viewerVideoNode = null;
+  viewerHmsInput = null;
+  viewerEditingField = null;
+  revokeViewerObjectUrl();
+  setViewerMode(false);
+}
+
+function renderViewerScreen(): void {
+  if (!viewerMedia) {
+    setViewerMode(false);
+    return;
+  }
+
+  const titleNode = getViewerTitleNode();
+  const contentNode = getViewerContentNode();
+  if (!titleNode || !contentNode) {
+    return;
+  }
+
+  titleNode.textContent = viewerMedia.title;
+  contentNode.replaceChildren();
+
+  if (viewerMedia.kind === "image") {
+    const imageNode = document.createElement("img");
+    imageNode.className = "viewer-image";
+    imageNode.src = viewerMedia.url;
+    imageNode.alt = viewerMedia.title;
+    contentNode.appendChild(imageNode);
+    setViewerMode(true);
+    return;
+  }
+
+  const videoNode = document.createElement("video");
+  videoNode.className = "viewer-video";
+  videoNode.controls = true;
+  videoNode.preload = "metadata";
+  videoNode.src = viewerMedia.url;
+  contentNode.appendChild(videoNode);
+
+  const controlsNode = document.createElement("div");
+  controlsNode.className = "time-controls";
+
+  const hmsRow = document.createElement("div");
+  hmsRow.className = "time-row";
+  const hmsLabel = document.createElement("div");
+  hmsLabel.className = "time-label";
+  hmsLabel.textContent = "HH:MM:SS|F";
+  const hmsInput = document.createElement("input");
+  hmsInput.className = "time-input";
+  hmsInput.type = "text";
+  hmsInput.placeholder = "00:00:00|0";
+  const hmsInputRow = document.createElement("div");
+  hmsInputRow.className = "time-input-row";
+  hmsInputRow.appendChild(hmsInput);
+
+  const copyLinkButton = document.createElement("button");
+  copyLinkButton.type = "button";
+  copyLinkButton.className = "viewer-action-button";
+  copyLinkButton.textContent = "Copy link";
+  copyLinkButton.addEventListener("click", () => {
+    void copyViewerShareLink(copyLinkButton);
+  });
+  hmsInputRow.appendChild(copyLinkButton);
+
+  if (viewerMedia.youtubeId) {
+    const openInYtButton = document.createElement("button");
+    openInYtButton.type = "button";
+    openInYtButton.className = "viewer-action-button";
+    openInYtButton.textContent = "Open in YT";
+    openInYtButton.addEventListener("click", () => {
+      openViewerInYoutube();
+    });
+    hmsInputRow.appendChild(openInYtButton);
+  }
+
+  const analyzeButton = document.createElement("button");
+  analyzeButton.type = "button";
+  analyzeButton.className = "viewer-action-button accent";
+  analyzeButton.textContent = "Analyze!";
+  hmsInputRow.appendChild(analyzeButton);
+
+  hmsRow.appendChild(hmsLabel);
+  hmsRow.appendChild(hmsInputRow);
+
+  controlsNode.appendChild(hmsRow);
+  contentNode.appendChild(controlsNode);
+
+  viewerVideoNode = videoNode;
+  viewerHmsInput = hmsInput;
+  viewerEditingField = null;
+
+  const commitAndSync = () => {
+    seekViewerFromInput();
+    viewerEditingField = null;
+    syncViewerTimeInputs(true);
+  };
+
+  hmsInput.addEventListener("focus", () => {
+    viewerEditingField = "hms";
+  });
+
+  hmsInput.addEventListener("blur", () => {
+    commitAndSync();
+  });
+
+  hmsInput.addEventListener("keydown", (event) => {
+    if (event.key !== "Enter") {
+      return;
+    }
+    event.preventDefault();
+    commitAndSync();
+    hmsInput.blur();
+  });
+
+  const updateEvents: Array<keyof HTMLMediaElementEventMap> = [
+    "loadedmetadata",
+    "timeupdate",
+    "seeking",
+    "seeked",
+    "play",
+    "pause",
+  ];
+  updateEvents.forEach((eventName) => {
+    videoNode.addEventListener(eventName, () => {
+      syncViewerTimeInputs(false);
+    });
+  });
+
+  videoNode.addEventListener("loadedmetadata", () => {
+    if (!viewerMedia || viewerVideoNode !== videoNode) {
+      return;
+    }
+    if (viewerMedia.initialSeekSeconds !== undefined) {
+      videoNode.currentTime = clampVideoTime(videoNode, viewerMedia.initialSeekSeconds);
+      viewerMedia.initialSeekSeconds = undefined;
+    }
+    syncViewerTimeInputs(true);
+  });
+
+  syncViewerTimeInputs(true);
+  setViewerMode(true);
+}
+
+function openViewer(nextViewer: ViewerMedia): void {
+  if (nextViewer.isObjectUrl) {
+    revokeViewerObjectUrl();
+    currentViewerObjectUrl = nextViewer.url;
+  } else {
+    revokeViewerObjectUrl();
+  }
+  viewerMedia = nextViewer;
+  renderViewerScreen();
 }
 
 function renderMediaList(): void {
@@ -599,8 +1198,16 @@ function renderMediaList(): void {
     titleNode.textContent = item.name;
     titleNode.addEventListener("click", () => {
       clearMediaError();
-      selectedMedia = { tab: activeMediaTab, id, item };
-      renderMediaBox();
+      openViewer({
+        tab: activeMediaTab,
+        id,
+        kind: activeMediaTab === "videos" ? "video" : "image",
+        title: item.name,
+        url: item.url,
+        ...(activeMediaTab === "videos" && "youtube_id" in item && item.youtube_id
+          ? { youtubeId: item.youtube_id }
+          : {}),
+      });
     });
 
     const metaNode = document.createElement("div");
@@ -627,54 +1234,68 @@ function renderMediaList(): void {
   mediaBoxNode.replaceChildren(listNode);
 }
 
-function renderSelectedMediaPlaceholder(): void {
-  const mediaBoxNode = getMediaBoxNode();
-  if (!mediaBoxNode || !selectedMedia) {
-    return;
-  }
+function createUploadZoneNode(): HTMLDivElement {
+  const zoneNode = document.createElement("div");
+  zoneNode.className = "upload-zone";
 
-  const container = document.createElement("div");
-  container.className = "selected-media";
+  const textNode = document.createElement("div");
+  textNode.className = "upload-copy";
+  textNode.textContent = selectedUploadFilename
+    ? `Selected file: ${selectedUploadFilename}`
+    : "Drag and drop a file here or click to select";
+  zoneNode.appendChild(textNode);
 
-  const titleNode = document.createElement("div");
-  titleNode.className = "selected-title";
-  titleNode.textContent = `Selected ${selectedMedia.tab === "videos" ? "Video" : "Image"}: ${selectedMedia.item.name}`;
+  const fileInput = document.getElementById("upload-file-input") as HTMLInputElement | null;
 
-  const idNode = document.createElement("div");
-  idNode.className = "selected-line";
-  idNode.textContent = `ID: ${selectedMedia.id}`;
-
-  const timestampNode = document.createElement("div");
-  timestampNode.className = "selected-line";
-  if (selectedMedia.timestampLabel) {
-    timestampNode.textContent = `Timestamp: ${selectedMedia.timestampLabel}`;
-  }
-
-  const urlNode = document.createElement("a");
-  configureExternalLink(urlNode, selectedMedia.item.url, selectedMedia.item.url);
-
-  const backButton = document.createElement("button");
-  backButton.type = "button";
-  backButton.className = "back-button";
-  backButton.textContent = "Back";
-  backButton.addEventListener("click", () => {
-    selectedMedia = null;
-    renderMediaBox();
+  zoneNode.addEventListener("click", () => {
+    fileInput?.click();
+  });
+  zoneNode.addEventListener("dragenter", (event) => {
+    event.preventDefault();
+    zoneNode.classList.add("dragover");
+  });
+  zoneNode.addEventListener("dragover", (event) => {
+    event.preventDefault();
+    zoneNode.classList.add("dragover");
+  });
+  zoneNode.addEventListener("dragleave", (event) => {
+    event.preventDefault();
+    zoneNode.classList.remove("dragover");
+  });
+  zoneNode.addEventListener("drop", (event) => {
+    event.preventDefault();
+    zoneNode.classList.remove("dragover");
+    const droppedFiles = event.dataTransfer?.files;
+    if (droppedFiles && droppedFiles.length > 0) {
+      const file = droppedFiles[0];
+      const objectUrl = URL.createObjectURL(file);
+      selectedUploadFilename = file.name;
+      openViewer({
+        tab: "upload",
+        id: "upload-file",
+        kind: inferMediaKindFromFile(file),
+        title: file.name,
+        url: objectUrl,
+        isObjectUrl: true,
+      });
+    }
   });
 
-  container.appendChild(titleNode);
-  container.appendChild(idNode);
-  if (selectedMedia.timestampLabel) {
-    container.appendChild(timestampNode);
-  }
-  container.appendChild(urlNode);
-  container.appendChild(backButton);
-  mediaBoxNode.replaceChildren(container);
+  return zoneNode;
 }
 
 function renderMediaBox(): void {
-  if (selectedMedia) {
-    renderSelectedMediaPlaceholder();
+  if (viewerMedia) {
+    renderViewerScreen();
+    return;
+  }
+  setViewerMode(false);
+  if (activeMediaTab === "upload") {
+    const mediaBoxNode = getMediaBoxNode();
+    if (!mediaBoxNode) {
+      return;
+    }
+    mediaBoxNode.replaceChildren(createUploadZoneNode());
     return;
   }
   if (mediaLoadState === "no_api") {
@@ -698,10 +1319,50 @@ function renderMediaBox(): void {
 
 function setActiveMediaTab(nextTab: MediaTab): void {
   activeMediaTab = nextTab;
-  selectedMedia = null;
   clearMediaError();
   setTabButtonState();
+  setViewerMode(false);
   renderMediaBox();
+}
+
+function handleViewerKeybind(event: KeyboardEvent): void {
+  if (!viewerVideoNode || !viewerMedia || viewerMedia.kind !== "video") {
+    return;
+  }
+  if (viewerEditingField) {
+    return;
+  }
+  const target = event.target as HTMLElement | null;
+  if (
+    target &&
+    (target.tagName === "INPUT" ||
+      target.tagName === "TEXTAREA" ||
+      target.isContentEditable)
+  ) {
+    return;
+  }
+
+  let deltaSeconds = 0;
+  if (event.key === ",") {
+    deltaSeconds = -1 / VIEWER_FPS;
+  } else if (event.key === ".") {
+    deltaSeconds = 1 / VIEWER_FPS;
+  } else if (event.key === "ArrowLeft") {
+    deltaSeconds = -5;
+  } else if (event.key === "ArrowRight") {
+    deltaSeconds = 5;
+  } else if (event.key === "j" || event.key === "J") {
+    deltaSeconds = -10;
+  } else if (event.key === "l" || event.key === "L") {
+    deltaSeconds = 10;
+  } else {
+    return;
+  }
+
+  event.preventDefault();
+  const current = Number.isFinite(viewerVideoNode.currentTime) ? viewerVideoNode.currentTime : 0;
+  viewerVideoNode.currentTime = clampVideoTime(viewerVideoNode, current + deltaSeconds);
+  syncViewerTimeInputs(true);
 }
 
 function handleSearchEnter(rawInput: string): void {
@@ -729,14 +1390,23 @@ function handleSearchEnter(rawInput: string): void {
       return;
     }
     activeMediaTab = "videos";
-    selectedMedia = {
+    const timestampLabel = extractYoutubeTimestampLabel(url);
+    const initialSeekSeconds = (() => {
+      const raw = (url.searchParams.get("t") || "").trim();
+      const parsed = parseTimestampSeconds(raw);
+      return parsed === null ? undefined : parsed;
+    })();
+    openViewer({
       tab: "videos",
       id: foundVideo.id,
-      item: foundVideo.item,
-      timestampLabel: extractYoutubeTimestampLabel(url),
-    };
+      kind: "video",
+      title: foundVideo.item.name,
+      url: foundVideo.item.url,
+      youtubeId: foundVideo.item.youtube_id,
+      timestampLabel,
+      initialSeekSeconds,
+    });
     setTabButtonState();
-    renderMediaBox();
     return;
   }
 
@@ -744,29 +1414,30 @@ function handleSearchEnter(rawInput: string): void {
   const matchedMedia = findMediaByNormalizedUrl(normalizedUrl);
   if (matchedMedia) {
     activeMediaTab = matchedMedia.tab;
-    selectedMedia = matchedMedia;
+    openViewer(matchedMedia);
     setTabButtonState();
-    renderMediaBox();
     return;
   }
 
-  activeMediaTab = "videos";
-  selectedMedia = {
-    tab: "videos",
+  const inferredKind = inferMediaKindFromUrl(url);
+  activeMediaTab = inferredKind === "image" ? "images" : "videos";
+  openViewer({
+    tab: activeMediaTab,
     id: "raw-url",
-    item: {
-      name: "Direct Video URL",
-      url: url.toString(),
-    },
-  };
+    kind: inferredKind,
+    title: url.toString(),
+    url: url.toString(),
+  });
   setTabButtonState();
-  renderMediaBox();
 }
 
 function installUiHandlers(): void {
   const videosButton = document.getElementById("tab-videos") as HTMLButtonElement | null;
   const imagesButton = document.getElementById("tab-images") as HTMLButtonElement | null;
+  const uploadButton = document.getElementById("tab-upload") as HTMLButtonElement | null;
+  const viewerBackButton = document.getElementById("viewer-back") as HTMLButtonElement | null;
   const searchInput = document.getElementById("media-search") as HTMLInputElement | null;
+  const fileInput = document.getElementById("upload-file-input") as HTMLInputElement | null;
   if (videosButton) {
     videosButton.addEventListener("click", () => {
       setActiveMediaTab("videos");
@@ -777,6 +1448,18 @@ function installUiHandlers(): void {
       setActiveMediaTab("images");
     });
   }
+  if (uploadButton) {
+    uploadButton.addEventListener("click", () => {
+      setActiveMediaTab("upload");
+    });
+  }
+  if (viewerBackButton) {
+    viewerBackButton.addEventListener("click", () => {
+      closeViewer();
+      renderMediaBox();
+    });
+  }
+  document.addEventListener("keydown", handleViewerKeybind);
   if (searchInput) {
     searchInput.addEventListener("input", () => {
       mediaSearchQuery = searchInput.value;
@@ -789,6 +1472,24 @@ function installUiHandlers(): void {
       }
       event.preventDefault();
       handleSearchEnter(searchInput.value);
+    });
+  }
+  if (fileInput) {
+    fileInput.addEventListener("change", () => {
+      if (fileInput.files && fileInput.files.length > 0) {
+        const file = fileInput.files[0];
+        const objectUrl = URL.createObjectURL(file);
+        selectedUploadFilename = file.name;
+        openViewer({
+          tab: "upload",
+          id: "upload-file",
+          kind: inferMediaKindFromFile(file),
+          title: file.name,
+          url: objectUrl,
+          isObjectUrl: true,
+        });
+        fileInput.value = "";
+      }
     });
   }
 }
@@ -815,6 +1516,7 @@ async function loadMediaLibrary(): Promise<void> {
     }
     mediaLibrary = parsed;
     mediaLoadState = "loaded";
+    applyLaunchSelectionIfAny();
     renderMediaBox();
   } catch {
     mediaLoadState = "failed";
@@ -823,6 +1525,7 @@ async function loadMediaLibrary(): Promise<void> {
 }
 
 function bootstrap(): void {
+  launchSelectionIntent = parseLaunchSelectionIntent();
   installGlobalApi();
   installUiHandlers();
   setTabButtonState();

@@ -90,6 +90,29 @@ __MCV_BODY_STYLE__
       min-height: 300px;
       color: #d7e7fb;
     }
+    .upload-zone {
+      min-height: 270px;
+      border: 2px dashed #4f6a85;
+      border-radius: 10px;
+      background: #121b24;
+      color: var(--muted);
+      display: grid;
+      place-items: center;
+      text-align: center;
+      padding: 24px;
+      cursor: pointer;
+      transition: border-color 120ms ease, background 120ms ease, color 120ms ease;
+    }
+    .upload-zone:hover,
+    .upload-zone.dragover {
+      border-color: var(--accent);
+      background: #16232d;
+      color: var(--text);
+    }
+    .upload-copy {
+      line-height: 1.45;
+      word-break: break-word;
+    }
     .media-list {
       list-style: none;
       margin: 0;
@@ -159,18 +182,139 @@ __MCV_BODY_STYLE__
     .back-button:hover {
       background: #1a2633;
     }
+    .viewer-top {
+      display: flex;
+      gap: 8px;
+      align-items: center;
+    }
+    .copy-button {
+      justify-self: start;
+      background: #111821;
+      color: var(--text);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      font-weight: 650;
+      padding: 8px 12px;
+      cursor: pointer;
+    }
+    .copy-button:hover {
+      background: #1a2633;
+    }
+    .hidden {
+      display: none;
+    }
+    .viewer-screen {
+      display: grid;
+      gap: 14px;
+    }
+    .viewer-screen.hidden {
+      display: none;
+    }
+    .viewer-title {
+      margin: 0;
+      font-size: 1.05rem;
+      font-weight: 700;
+      word-break: break-word;
+    }
+    .viewer-content {
+      display: grid;
+      gap: 12px;
+    }
+    .viewer-video {
+      width: 100%;
+      max-height: 60vh;
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      background: #000;
+    }
+    .viewer-image {
+      width: 100%;
+      max-height: 70vh;
+      object-fit: contain;
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      background: #000;
+    }
+    .time-controls {
+      display: grid;
+      gap: 8px;
+    }
+    .time-row {
+      display: grid;
+      gap: 6px;
+    }
+    .time-input-row {
+      display: flex;
+      gap: 8px;
+      align-items: center;
+      flex-wrap: wrap;
+    }
+    .time-label {
+      font-size: 0.86rem;
+      color: var(--muted);
+    }
+    .time-input {
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      background: #111821;
+      color: var(--text);
+      padding: 8px 10px;
+      font-size: 0.93rem;
+      outline: none;
+      min-width: 220px;
+      flex: 1 1 240px;
+    }
+    .time-input:focus {
+      border-color: #4f6a85;
+    }
+    .viewer-action-button {
+      background: #111821;
+      color: var(--text);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      font-weight: 650;
+      padding: 8px 12px;
+      cursor: pointer;
+      white-space: nowrap;
+    }
+    .viewer-action-button:hover {
+      background: #1a2633;
+    }
+    .viewer-action-button.accent {
+      background: var(--accent);
+      color: #082014;
+      border-color: transparent;
+    }
+    .viewer-action-button.accent:hover {
+      filter: brightness(1.04);
+    }
+    .viewer-note {
+      color: var(--muted);
+      font-size: 0.9rem;
+    }
   </style>
 </head>
 <body>
   <main class="card">
-    <h1>MinecraftCV</h1>
-    <div class="tabs">
-      <button id="tab-videos" class="tab-button active" type="button">Videos</button>
-      <button id="tab-images" class="tab-button" type="button">Images</button>
+    <div id="selector-screen">
+      <h1>MinecraftCV</h1>
+      <div class="tabs">
+        <button id="tab-videos" class="tab-button active" type="button">Videos</button>
+        <button id="tab-images" class="tab-button" type="button">Images</button>
+        <button id="tab-upload" class="tab-button" type="button">Upload</button>
+      </div>
+      <input id="media-search" class="search-input" type="text" placeholder="URL/search query" />
+      <input id="upload-file-input" type="file" hidden />
+      <div id="media-error" class="media-error"></div>
+      <div id="media-box" class="media-box">loading...</div>
     </div>
-    <input id="media-search" class="search-input" type="text" placeholder="URL/search query" />
-    <div id="media-error" class="media-error"></div>
-    <div id="media-box" class="media-box">loading...</div>
+    <div id="viewer-screen" class="viewer-screen hidden">
+      <div class="viewer-top">
+        <button id="viewer-back" type="button" class="back-button">Back</button>
+      </div>
+      <h2 id="viewer-title" class="viewer-title"></h2>
+      <div id="viewer-content" class="viewer-content"></div>
+    </div>
   </main>
 __BACKEND_SCRIPTS__
   <script>
