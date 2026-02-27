@@ -166,16 +166,16 @@ let activeSelectionRectClient: SelectionRectClient | null = null;
 let activeSelectionRectPixels: SelectionRectPixels | null = null;
 let selectionPipelineTokenCounter = 0;
 let activeSelectionPipelineToken = 0;
-let cropManualMode = false;
 let cropResultCache:
   | {
       colorDataUrl: string;
-      grayDataUrl: string;
-      lineSegments: McvLineSegment[];
       width: number;
       height: number;
     }
   | null = null;
+let manualLineSegments: McvLineSegment[] = [];
+let manualDraftLineSegment: McvLineSegment | null = null;
+let manualDragPointerId: number | null = null;
 let mediaLibrary: MediaLibrary = {
   videos: {},
   images: {},
@@ -185,6 +185,12 @@ const NO_YOUTUBE_VIDEO_ERROR =
   "video is not provided by the Media API, please download the video yourself and upload it.";
 const NO_MEDIA_ID_ERROR = "media ID is not provided by the Media API.";
 const VIEWER_FPS = 30;
+
+function resetCropInteractionState(): void {
+  manualLineSegments = [];
+  manualDraftLineSegment = null;
+  manualDragPointerId = null;
+}
 
 function isThenable(value: unknown): value is Promise<unknown> {
   return typeof value === "object" && value !== null && "then" in value;
@@ -766,8 +772,8 @@ function clearViewerFullImage(): void {
   activeSelectionRectClient = null;
   activeSelectionRectPixels = null;
   activeSelectionPipelineToken = ++selectionPipelineTokenCounter;
-  cropManualMode = false;
   cropResultCache = null;
+  resetCropInteractionState();
   hideViewerCropResult();
   hideViewerSelectionBox();
 }
@@ -793,8 +799,8 @@ function showViewerFullImage(src: string, alt: string): void {
   activeSelectionRectClient = null;
   activeSelectionRectPixels = null;
   activeSelectionPipelineToken = ++selectionPipelineTokenCounter;
-  cropManualMode = false;
   cropResultCache = null;
+  resetCropInteractionState();
   hideViewerSelectionBox();
   hideViewerCropResult();
   image.crossOrigin = "anonymous";
@@ -809,12 +815,7 @@ function showViewerFullImage(src: string, alt: string): void {
   window.setTimeout(scrollViewerFullImageIntoView, 60);
 }
 
-function createCropResultSvg(
-  width: number,
-  height: number,
-  grayDataUrl: string,
-  segments: McvLineSegment[]
-): SVGSVGElement {
+function createCropResultSvgBase(width: number, height: number, imageDataUrl: string): SVGSVGElement {
   const svgNs = "http://www.w3.org/2000/svg";
   const svg = document.createElementNS(svgNs, "svg");
   svg.classList.add("viewer-crop-result-svg");
@@ -824,28 +825,147 @@ function createCropResultSvg(
   svg.setAttribute("height", String(height));
 
   const imageNode = document.createElementNS(svgNs, "image");
-  imageNode.setAttribute("href", grayDataUrl);
+  imageNode.setAttribute("href", imageDataUrl);
   imageNode.setAttribute("x", "0");
   imageNode.setAttribute("y", "0");
   imageNode.setAttribute("width", String(width));
   imageNode.setAttribute("height", String(height));
   imageNode.setAttribute("preserveAspectRatio", "none");
   svg.appendChild(imageNode);
+  return svg;
+}
 
-  const group = document.createElementNS(svgNs, "g");
-  group.setAttribute("stroke", "var(--accent)");
-  group.setAttribute("stroke-width", "1");
-  group.setAttribute("stroke-linecap", "round");
-  group.setAttribute("vector-effect", "non-scaling-stroke");
-  for (const segment of segments) {
-    const line = document.createElementNS(svgNs, "line");
-    line.setAttribute("x1", String(segment[0]));
-    line.setAttribute("y1", String(segment[1]));
-    line.setAttribute("x2", String(segment[2]));
-    line.setAttribute("y2", String(segment[3]));
-    group.appendChild(line);
+function appendSvgLine(
+  parent: SVGElement,
+  segment: McvLineSegment,
+  stroke: string,
+  strokeWidth = 1,
+  opacity = 1
+): void {
+  const svgNs = "http://www.w3.org/2000/svg";
+  const line = document.createElementNS(svgNs, "line");
+  line.setAttribute("x1", String(segment[0]));
+  line.setAttribute("y1", String(segment[1]));
+  line.setAttribute("x2", String(segment[2]));
+  line.setAttribute("y2", String(segment[3]));
+  line.setAttribute("stroke", stroke);
+  line.setAttribute("stroke-width", String(strokeWidth));
+  line.setAttribute("stroke-linecap", "round");
+  line.setAttribute("vector-effect", "non-scaling-stroke");
+  line.setAttribute("opacity", String(opacity));
+  parent.appendChild(line);
+}
+
+function appendSvgIntersectionDot(parent: SVGElement, x: number, y: number): void {
+  const svgNs = "http://www.w3.org/2000/svg";
+  const circle = document.createElementNS(svgNs, "circle");
+  circle.setAttribute("cx", String(x));
+  circle.setAttribute("cy", String(y));
+  circle.setAttribute("r", "1.5");
+  circle.setAttribute("fill", "#ffe14d");
+  circle.setAttribute("stroke", "#111821");
+  circle.setAttribute("stroke-width", "0.6");
+  circle.setAttribute("vector-effect", "non-scaling-stroke");
+  parent.appendChild(circle);
+}
+
+function getLineIntersection(
+  first: McvLineSegment,
+  second: McvLineSegment
+): { x: number; y: number } | null {
+  const x1 = first[0];
+  const y1 = first[1];
+  const x2 = first[2];
+  const y2 = first[3];
+  const x3 = second[0];
+  const y3 = second[1];
+  const x4 = second[2];
+  const y4 = second[3];
+  const denom = (x1 - x2) * (y3 - y4) - (y1 - y2) * (x3 - x4);
+  if (Math.abs(denom) < 1e-9) {
+    return null;
   }
-  svg.appendChild(group);
+  const detFirst = x1 * y2 - y1 * x2;
+  const detSecond = x3 * y4 - y3 * x4;
+  const x = (detFirst * (x3 - x4) - (x1 - x2) * detSecond) / denom;
+  const y = (detFirst * (y3 - y4) - (y1 - y2) * detSecond) / denom;
+  if (!Number.isFinite(x) || !Number.isFinite(y)) {
+    return null;
+  }
+  return { x, y };
+}
+
+function getCropPointFromClient(
+  clientX: number,
+  clientY: number,
+  width: number,
+  height: number
+): { x: number; y: number } | null {
+  const cropResultNode = getViewerCropResultNode();
+  const displayNode = cropResultNode?.firstElementChild as
+    | (Element & { getBoundingClientRect: () => DOMRect })
+    | null;
+  if (!displayNode) {
+    return null;
+  }
+  const rect = displayNode.getBoundingClientRect();
+  if (rect.width <= 0 || rect.height <= 0) {
+    return null;
+  }
+  const x = Math.max(0, Math.min(1, (clientX - rect.left) / rect.width)) * width;
+  const y = Math.max(0, Math.min(1, (clientY - rect.top) / rect.height)) * height;
+  return { x, y };
+}
+
+function createManualModeCropResultSvg(
+  width: number,
+  height: number,
+  colorDataUrl: string
+): SVGSVGElement {
+  const svg = createCropResultSvgBase(width, height, colorDataUrl);
+
+  if (manualLineSegments[0]) {
+    appendSvgLine(svg, manualLineSegments[0], "#ff4d4d", 2, 1);
+  }
+  if (manualLineSegments[1]) {
+    appendSvgLine(svg, manualLineSegments[1], "#5dff74", 2, 1);
+  }
+  if (manualDraftLineSegment) {
+    const draftColor = manualLineSegments.length === 0 ? "#ff4d4d" : "#5dff74";
+    appendSvgLine(svg, manualDraftLineSegment, draftColor, 2, 0.9);
+  }
+
+  const first = manualLineSegments[0];
+  const second = manualLineSegments[1];
+  if (first && second) {
+    const intersection = getLineIntersection(first, second);
+    if (intersection) {
+      appendSvgIntersectionDot(svg, intersection.x, intersection.y);
+    }
+  }
+
+  svg.addEventListener("pointerdown", (event) => {
+    if (event.button !== 0 || !cropResultCache) {
+      return;
+    }
+    const point = getCropPointFromClient(
+      event.clientX,
+      event.clientY,
+      cropResultCache.width,
+      cropResultCache.height
+    );
+    if (!point) {
+      return;
+    }
+    if (manualLineSegments.length >= 2) {
+      manualLineSegments = [];
+    }
+    manualDraftLineSegment = [point.x, point.y, point.x, point.y];
+    manualDragPointerId = event.pointerId;
+    event.preventDefault();
+    renderCropResultFromCache();
+  });
+
   return svg;
 }
 
@@ -873,25 +993,77 @@ function renderCropResultFromCache(): void {
     return;
   }
 
-  if (cropManualMode) {
-    const image = document.createElement("img");
-    image.className = "viewer-crop-result-svg";
-    image.src = cropResultCache.colorDataUrl;
-    image.alt = "Manual crop";
-    image.style.objectFit = "contain";
-    sizeCropResultElement(image, cropResultCache.width, cropResultCache.height);
-    cropResultNode.replaceChildren(image);
-  } else {
-    const svg = createCropResultSvg(
-      cropResultCache.width,
-      cropResultCache.height,
-      cropResultCache.grayDataUrl,
-      cropResultCache.lineSegments
-    );
-    sizeCropResultElement(svg, cropResultCache.width, cropResultCache.height);
-    cropResultNode.replaceChildren(svg);
-  }
+  const svg = createManualModeCropResultSvg(
+    cropResultCache.width,
+    cropResultCache.height,
+    cropResultCache.colorDataUrl
+  );
+  sizeCropResultElement(svg, cropResultCache.width, cropResultCache.height);
+  cropResultNode.replaceChildren(svg);
   showViewerCropResult();
+}
+
+function updateManualDraftFromPointer(pointer: PointerEvent): void {
+  if (
+    !cropResultCache ||
+    manualDragPointerId === null ||
+    pointer.pointerId !== manualDragPointerId ||
+    !manualDraftLineSegment
+  ) {
+    return;
+  }
+  const point = getCropPointFromClient(
+    pointer.clientX,
+    pointer.clientY,
+    cropResultCache.width,
+    cropResultCache.height
+  );
+  if (!point) {
+    return;
+  }
+  manualDraftLineSegment = [
+    manualDraftLineSegment[0],
+    manualDraftLineSegment[1],
+    point.x,
+    point.y,
+  ];
+  renderCropResultFromCache();
+}
+
+function finalizeManualDraftFromPointer(pointer: PointerEvent): void {
+  if (
+    !cropResultCache ||
+    manualDragPointerId === null ||
+    pointer.pointerId !== manualDragPointerId
+  ) {
+    return;
+  }
+  manualDragPointerId = null;
+  if (!manualDraftLineSegment) {
+    return;
+  }
+  const point = getCropPointFromClient(
+    pointer.clientX,
+    pointer.clientY,
+    cropResultCache.width,
+    cropResultCache.height
+  );
+  const committedSegment: McvLineSegment = point
+    ? [manualDraftLineSegment[0], manualDraftLineSegment[1], point.x, point.y]
+    : manualDraftLineSegment;
+  manualDraftLineSegment = null;
+
+  const length = Math.hypot(
+    committedSegment[2] - committedSegment[0],
+    committedSegment[3] - committedSegment[1]
+  );
+  if (length >= 2) {
+    manualLineSegments.push(committedSegment);
+    if (manualLineSegments.length > 2) {
+      manualLineSegments = manualLineSegments.slice(-2);
+    }
+  }
+  renderCropResultFromCache();
 }
 
 function startSelectionPipelineFromActiveRect(): void {
@@ -909,42 +1081,22 @@ function startSelectionPipelineFromActiveRect(): void {
   clearMediaError();
   setViewerSelectionBoxState("cropping");
   showFullImageLayer();
-  cropManualMode = false;
   cropResultCache = null;
+  resetCropInteractionState();
 
-  const token = ++selectionPipelineTokenCounter;
-  activeSelectionPipelineToken = token;
-
-  void (async () => {
-    try {
-      const result = await runImagePipeline({
-        image_data_url: cropDataUrl,
-      });
-      if (token !== activeSelectionPipelineToken) {
-        return;
-      }
-      cropResultCache = {
-        colorDataUrl: cropDataUrl,
-        grayDataUrl: result.grayscale_image_data_url,
-        lineSegments: result.line_segments,
-        width: result.width,
-        height: result.height,
-      };
-      renderCropResultFromCache();
-      const image = getViewerFullImageNode();
-      if (image) {
-        image.classList.add("hidden");
-      }
-      hideViewerSelectionBox();
-      scrollViewerFullImageIntoView();
-    } catch (error) {
-      if (token !== activeSelectionPipelineToken) {
-        return;
-      }
-      setMediaError(`Pipeline failed: ${String(error)}`);
-      setViewerSelectionBoxState("default");
-    }
-  })();
+  activeSelectionPipelineToken = ++selectionPipelineTokenCounter;
+  cropResultCache = {
+    colorDataUrl: cropDataUrl,
+    width: activeSelectionRectPixels.width,
+    height: activeSelectionRectPixels.height,
+  };
+  renderCropResultFromCache();
+  const image = getViewerFullImageNode();
+  if (image) {
+    image.classList.add("hidden");
+  }
+  hideViewerSelectionBox();
+  scrollViewerFullImageIntoView();
 }
 
 function setMediaError(message: string): void {
@@ -2038,8 +2190,8 @@ function restoreFullUncroppedImageView(): void {
   activeSelectionRectClient = null;
   activeSelectionRectPixels = null;
   activeSelectionPipelineToken = ++selectionPipelineTokenCounter;
-  cropManualMode = false;
   cropResultCache = null;
+  resetCropInteractionState();
   hideViewerSelectionBox();
   showFullImageLayer();
   clearMediaError();
@@ -2169,7 +2321,6 @@ function installUiHandlers(): void {
   const searchInput = document.getElementById("media-search") as HTMLInputElement | null;
   const fileInput = document.getElementById("upload-file-input") as HTMLInputElement | null;
   const viewerFullImage = getViewerFullImageNode();
-  const viewerStage = getViewerFullImageStageNode();
   if (videosButton) {
     videosButton.addEventListener("click", () => {
       setActiveMediaTab("videos");
@@ -2192,6 +2343,15 @@ function installUiHandlers(): void {
     });
   }
   document.addEventListener("keydown", handleViewerKeybind);
+  document.addEventListener("pointermove", (event) => {
+    updateManualDraftFromPointer(event);
+  });
+  document.addEventListener("pointerup", (event) => {
+    finalizeManualDraftFromPointer(event);
+  });
+  document.addEventListener("pointercancel", (event) => {
+    finalizeManualDraftFromPointer(event);
+  });
   if (searchInput) {
     searchInput.addEventListener("input", () => {
       mediaSearchQuery = searchInput.value;
@@ -2282,16 +2442,6 @@ function installUiHandlers(): void {
     });
     viewerFullImage.addEventListener("pointercancel", () => {
       finishSelection();
-    });
-  }
-  if (viewerStage) {
-    viewerStage.addEventListener("contextmenu", (event) => {
-      if (!cropResultCache) {
-        return;
-      }
-      event.preventDefault();
-      cropManualMode = !cropManualMode;
-      renderCropResultFromCache();
     });
   }
 }

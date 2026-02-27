@@ -1,6 +1,6 @@
 # What does MCV do?
 
-Minecraft Computer Vision (MCV) is a tool for recreating Minecraft player poses from images and video. It lets you label points on a Minecraft world image with edge-detection assistance, pair those points with in-game world coordinates, and then solve the PnP problem (estimating camera pose and focal length from 2D-3D correspondences). This tool was created to assist in collecting evidence for the Dream MCC 11 Parkour cheating controversy, but it can be used for many other applications. For those reasons, it is open source and free for anyone to use.
+Minecraft Computer Vision (MCV) is a tool for recreating Minecraft player poses from images and video. It lets you label points on a Minecraft world image ~~with edge-detection assistance~~ by drawing lines, pair those points with in-game world coordinates, and then solve the PnP problem (estimating camera pose and focal length from 2D-3D correspondences). This tool was created to assist in collecting evidence for the Dream MCC 11 Parkour cheating controversy, but it can be used for many other applications. For those reasons, it is open source and free for anyone to use.
 
 # Where does it run?
 
@@ -31,7 +31,7 @@ In the future, I hope to make either a server-side or client-side tool that lets
 
 - /examples
   - /labeled: Some real examples of labeled points and their corresponding world coordinates, along with the original images and ground truths for testing the PnP system.
-  - /images: Some random images that can be used for testing the corner selector tool and edge detection.
+  - /images: Some random images that can be used for testing the corner selector tool and ~~edge detection~~.
 - /python_prototype: My first working prototype of the corner selector tool and PnP solver, written in Python using OpenCV.
 
 # Build
