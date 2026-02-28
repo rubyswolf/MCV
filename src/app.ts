@@ -4826,7 +4826,10 @@ function handleViewerKeybind(event: KeyboardEvent): void {
       setManualInteractionMode("vertexSolve");
       return;
     }
-    if (event.key === "4" || event.code === "Numpad4") {
+    if (
+      (event.key === "4" || event.code === "Numpad4") &&
+      !(getManualInteractionMode() === "anchor" && manualAnchorSelectedIndex !== null)
+    ) {
       event.preventDefault();
       setManualInteractionMode("edit");
       return;
