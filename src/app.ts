@@ -74,7 +74,7 @@ type DraftManualLine = {
   flipped: boolean;
   length?: number;
 };
-type ManualInteractionMode = "draw" | "anchor";
+type ManualInteractionMode = "draw" | "anchor" | "edit";
 type StructureVertex = {
   endpointIds: number[];
   point: ManualPoint;
@@ -219,6 +219,8 @@ let manualInteractionMode: ManualInteractionMode = "draw";
 let manualAnchorSelectedIndex: number | null = null;
 let manualAnchorSelectedInput = "";
 let manualAnchorHoveredVertex: StructureVertex | null = null;
+let manualEditHoveredLineIndex: number | null = null;
+let manualEditSelectedLineIndex: number | null = null;
 let viewerCtrlHeld = false;
 let renderAnnotationPreviewHeld = false;
 let viewerMotionRafId: number | null = null;
@@ -548,6 +550,20 @@ function popAnnotationWithStructureUnlink(): ManualAnnotation | undefined {
     manualAnchorSelectedIndex = null;
     manualAnchorSelectedInput = "";
   }
+  if (manualEditSelectedLineIndex !== null) {
+    if (manualEditSelectedLineIndex === removedIndex) {
+      manualEditSelectedLineIndex = null;
+    } else if (manualEditSelectedLineIndex > removedIndex) {
+      manualEditSelectedLineIndex -= 1;
+    }
+  }
+  if (manualEditHoveredLineIndex !== null) {
+    if (manualEditHoveredLineIndex === removedIndex) {
+      manualEditHoveredLineIndex = null;
+    } else if (manualEditHoveredLineIndex > removedIndex) {
+      manualEditHoveredLineIndex -= 1;
+    }
+  }
   recomputeStructureGeometryFromConnections();
   return removed;
 }
@@ -574,6 +590,8 @@ function resetCropInteractionState(): void {
   manualAnchorSelectedIndex = null;
   manualAnchorSelectedInput = "";
   manualAnchorHoveredVertex = null;
+  manualEditHoveredLineIndex = null;
+  manualEditSelectedLineIndex = null;
   manualAxisStartsBackwards = false;
   renderAnnotationPreviewHeld = false;
 }
@@ -1307,10 +1325,20 @@ function setManualInteractionMode(mode: ManualInteractionMode): void {
   if (mode === "anchor") {
     manualDraftLine = null;
     manualDragPointerId = null;
+    manualEditHoveredLineIndex = null;
+    manualEditSelectedLineIndex = null;
+  } else if (mode === "edit") {
+    manualDraftLine = null;
+    manualDragPointerId = null;
+    manualAnchorHoveredVertex = null;
+    manualAnchorSelectedIndex = null;
+    manualAnchorSelectedInput = "";
   } else {
     manualAnchorHoveredVertex = null;
     manualAnchorSelectedIndex = null;
     manualAnchorSelectedInput = "";
+    manualEditHoveredLineIndex = null;
+    manualEditSelectedLineIndex = null;
   }
   renderCropResultFromCache();
 }
@@ -1669,6 +1697,203 @@ function findNearestStructureVertex(point: ManualPoint): StructureVertex | null 
   return best;
 }
 
+function getCurrentLinesForDisplay(): Array<ManualAnnotation | StructureLine> {
+  return renderAnnotationPreviewHeld ? MCV_DATA.annotations : MCV_DATA.structure.lines;
+}
+
+function getDistancePointToSegment(point: ManualPoint, segment: McvLineSegment): number {
+  const x1 = segment[0];
+  const y1 = segment[1];
+  const x2 = segment[2];
+  const y2 = segment[3];
+  const dx = x2 - x1;
+  const dy = y2 - y1;
+  const lenSq = dx * dx + dy * dy;
+  if (lenSq < 1e-9) {
+    return Math.hypot(point.x - x1, point.y - y1);
+  }
+  const t = Math.max(0, Math.min(1, ((point.x - x1) * dx + (point.y - y1) * dy) / lenSq));
+  const projX = x1 + t * dx;
+  const projY = y1 + t * dy;
+  return Math.hypot(point.x - projX, point.y - projY);
+}
+
+function findClosestDisplayedLineIndex(point: ManualPoint): number {
+  const lines = getCurrentLinesForDisplay();
+  if (lines.length === 0) {
+    return -1;
+  }
+  let bestIndex = -1;
+  let bestDistance = Number.POSITIVE_INFINITY;
+  lines.forEach((line, index) => {
+    const distance = getDistancePointToSegment(point, getLineSegmentForLine(line));
+    if (distance < bestDistance) {
+      bestDistance = distance;
+      bestIndex = index;
+    }
+  });
+  return bestIndex;
+}
+
+function updateEditHoverFromClient(clientX: number, clientY: number): void {
+  if (!cropResultCache || getManualInteractionMode() !== "edit") {
+    if (manualEditHoveredLineIndex !== null) {
+      manualEditHoveredLineIndex = null;
+      renderCropResultFromCache();
+    }
+    return;
+  }
+  const point = getCropPointFromClient(clientX, clientY, cropResultCache.width, cropResultCache.height);
+  const next = point ? findClosestDisplayedLineIndex(point) : -1;
+  const nextValue = next >= 0 ? next : null;
+  if (manualEditHoveredLineIndex !== nextValue) {
+    manualEditHoveredLineIndex = nextValue;
+    renderCropResultFromCache();
+  }
+}
+
+function swapAnchorEndpointForLine(lineIndex: number): void {
+  MCV_DATA.structure.anchors.forEach((anchor) => {
+    const hasFrom = anchor.from.includes(lineIndex);
+    const hasTo = anchor.to.includes(lineIndex);
+    if (hasFrom) {
+      anchor.from = anchor.from.filter((value) => value !== lineIndex);
+    }
+    if (hasTo) {
+      anchor.to = anchor.to.filter((value) => value !== lineIndex);
+    }
+    if (hasFrom) {
+      anchor.to.push(lineIndex);
+    }
+    if (hasTo) {
+      anchor.from.push(lineIndex);
+    }
+    anchor.from = Array.from(new Set(anchor.from)).sort((a, b) => a - b);
+    anchor.to = Array.from(new Set(anchor.to)).sort((a, b) => a - b);
+  });
+}
+
+function adjustSelectedLineLength(delta: number): void {
+  if (manualEditSelectedLineIndex === null) {
+    return;
+  }
+  const line = MCV_DATA.annotations[manualEditSelectedLineIndex];
+  if (!line) {
+    manualEditSelectedLineIndex = null;
+    return;
+  }
+  const current = line.length ?? 0;
+  const next = Math.max(0, current + delta);
+  if (next > 0) {
+    line.length = next;
+  } else {
+    delete line.length;
+  }
+  const structureLine = MCV_DATA.structure.lines[manualEditSelectedLineIndex];
+  if (structureLine) {
+    if (next > 0) {
+      structureLine.length = next;
+    } else {
+      delete structureLine.length;
+    }
+  }
+  renderCropResultFromCache();
+}
+
+function flipSelectedLineDirection(): void {
+  if (manualEditSelectedLineIndex === null) {
+    return;
+  }
+  const line = MCV_DATA.annotations[manualEditSelectedLineIndex];
+  if (!line) {
+    manualEditSelectedLineIndex = null;
+    return;
+  }
+  const nextFrom = { x: line.to.x, y: line.to.y };
+  const nextTo = { x: line.from.x, y: line.from.y };
+  line.from = nextFrom;
+  line.to = nextTo;
+  swapAnchorEndpointForLine(manualEditSelectedLineIndex);
+  rebuildStructureFromAnnotations();
+  renderCropResultFromCache();
+}
+
+function updateSelectedLineAxis(axis: ManualAxis, startsBackwards: boolean): void {
+  if (manualEditSelectedLineIndex === null) {
+    return;
+  }
+  const line = MCV_DATA.annotations[manualEditSelectedLineIndex];
+  if (!line) {
+    manualEditSelectedLineIndex = null;
+    return;
+  }
+  line.axis = axis;
+  if (startsBackwards) {
+    const nextFrom = { x: line.to.x, y: line.to.y };
+    const nextTo = { x: line.from.x, y: line.from.y };
+    line.from = nextFrom;
+    line.to = nextTo;
+    swapAnchorEndpointForLine(manualEditSelectedLineIndex);
+  }
+  rebuildStructureFromAnnotations();
+  renderCropResultFromCache();
+}
+
+function removeAnchorAtIndex(anchorIndex: number): void {
+  if (anchorIndex < 0 || anchorIndex >= MCV_DATA.structure.anchors.length) {
+    return;
+  }
+  MCV_DATA.structure.anchors.splice(anchorIndex, 1);
+  if (manualAnchorSelectedIndex !== null) {
+    if (manualAnchorSelectedIndex === anchorIndex) {
+      manualAnchorSelectedIndex = null;
+      manualAnchorSelectedInput = "";
+    } else if (manualAnchorSelectedIndex > anchorIndex) {
+      manualAnchorSelectedIndex -= 1;
+    }
+  }
+  renderCropResultFromCache();
+}
+
+function removeLineAtIndex(lineIndex: number): void {
+  if (lineIndex < 0 || lineIndex >= MCV_DATA.annotations.length) {
+    return;
+  }
+  MCV_DATA.annotations.splice(lineIndex, 1);
+  MCV_DATA.structure.anchors = MCV_DATA.structure.anchors
+    .map((anchor) => {
+      const nextFrom = anchor.from
+        .filter((value) => value !== lineIndex)
+        .map((value) => (value > lineIndex ? value - 1 : value));
+      const nextTo = anchor.to
+        .filter((value) => value !== lineIndex)
+        .map((value) => (value > lineIndex ? value - 1 : value));
+      return {
+        ...anchor,
+        from: Array.from(new Set(nextFrom)).sort((a, b) => a - b),
+        to: Array.from(new Set(nextTo)).sort((a, b) => a - b),
+      };
+    })
+    .filter((anchor) => anchor.from.length > 0 || anchor.to.length > 0);
+  if (manualEditSelectedLineIndex !== null) {
+    if (manualEditSelectedLineIndex === lineIndex) {
+      manualEditSelectedLineIndex = null;
+    } else if (manualEditSelectedLineIndex > lineIndex) {
+      manualEditSelectedLineIndex -= 1;
+    }
+  }
+  if (manualEditHoveredLineIndex !== null) {
+    if (manualEditHoveredLineIndex === lineIndex) {
+      manualEditHoveredLineIndex = null;
+    } else if (manualEditHoveredLineIndex > lineIndex) {
+      manualEditHoveredLineIndex -= 1;
+    }
+  }
+  manualRedoLines.length = 0;
+  rebuildStructureFromAnnotations();
+  renderCropResultFromCache();
+}
+
 function getAxisMarkerId(axis: ManualAxis): string {
   return `mcv-arrow-${axis}`;
 }
@@ -1786,10 +2011,9 @@ function createManualModeCropResultSvg(
   }
 
   const anchorMode = getManualInteractionMode() === "anchor";
+  const editMode = getManualInteractionMode() === "edit";
   const potentialLinkIndexes = manualDraftLine ? getDraftPotentialLinkIndexes(manualDraftLine) : new Set<number>();
-  const linesToRender: Array<ManualAnnotation | StructureLine> = renderAnnotationPreviewHeld
-    ? MCV_DATA.annotations
-    : MCV_DATA.structure.lines;
+  const linesToRender: Array<ManualAnnotation | StructureLine> = getCurrentLinesForDisplay();
 
   const anchorLightIndexes = new Set<number>();
   if (anchorMode) {
@@ -1809,8 +2033,10 @@ function createManualModeCropResultSvg(
   }
 
   linesToRender.forEach((line, index) => {
+    const editHighlighted =
+      editMode && (manualEditHoveredLineIndex === index || manualEditSelectedLineIndex === index);
     const axisColor =
-      anchorMode && anchorLightIndexes.has(index)
+      (anchorMode && anchorLightIndexes.has(index)) || editHighlighted
         ? getAxisLightColor(line.axis)
         : potentialLinkIndexes.has(index)
           ? getAxisLightColor(line.axis)
@@ -1920,6 +2146,14 @@ function createManualModeCropResultSvg(
       renderCropResultFromCache();
       return;
     }
+    if (editMode) {
+      const nearestLineIndex = findClosestDisplayedLineIndex(point);
+      manualEditHoveredLineIndex = nearestLineIndex >= 0 ? nearestLineIndex : null;
+      manualEditSelectedLineIndex = nearestLineIndex >= 0 ? nearestLineIndex : null;
+      event.preventDefault();
+      renderCropResultFromCache();
+      return;
+    }
 
     manualDraftLine = {
       from: { x: point.x, y: point.y },
@@ -1964,7 +2198,11 @@ function createManualModeCropResultSvg(
       return;
     }
     event.preventDefault();
-    adjustDraftEdgeLength(1);
+    if (editMode) {
+      adjustSelectedLineLength(1);
+    } else {
+      adjustDraftEdgeLength(1);
+    }
   });
 
   applyViewerTransformToSvg();
@@ -2038,6 +2276,10 @@ function updateManualDraftFromPointer(pointer: PointerEvent): void {
 
   if (getManualInteractionMode() === "anchor") {
     updateAnchorHoverFromClient(pointer.clientX, pointer.clientY);
+    return;
+  }
+  if (getManualInteractionMode() === "edit") {
+    updateEditHoverFromClient(pointer.clientX, pointer.clientY);
     return;
   }
 
@@ -3240,11 +3482,18 @@ function handleViewerKeybind(event: KeyboardEvent): void {
       setManualInteractionMode("anchor");
       return;
     }
+    if (event.key === "4" || event.code === "Numpad4") {
+      event.preventDefault();
+      setManualInteractionMode("edit");
+      return;
+    }
 
     if (event.key === "Escape" || event.key === "Enter") {
       event.preventDefault();
       if (getManualInteractionMode() === "anchor") {
         setManualAnchorSelection(null);
+      } else if (getManualInteractionMode() === "edit") {
+        manualEditSelectedLineIndex = null;
       } else if (manualDraftLine) {
         manualDraftLine = null;
         manualDragPointerId = null;
@@ -3256,9 +3505,25 @@ function handleViewerKeybind(event: KeyboardEvent): void {
     if (getManualInteractionMode() === "anchor" && tryHandleAnchorInputKey(event)) {
       return;
     }
+    if (event.key === "Delete") {
+      if (getManualInteractionMode() === "anchor") {
+        event.preventDefault();
+        if (manualAnchorSelectedIndex !== null) {
+          removeAnchorAtIndex(manualAnchorSelectedIndex);
+        }
+        return;
+      }
+      if (getManualInteractionMode() === "edit") {
+        event.preventDefault();
+        if (manualEditSelectedLineIndex !== null) {
+          removeLineAtIndex(manualEditSelectedLineIndex);
+        }
+        return;
+      }
+    }
 
     if (event.ctrlKey && !event.shiftKey && (event.key === "z" || event.key === "Z")) {
-      if (getManualInteractionMode() === "anchor") {
+      if (getManualInteractionMode() === "anchor" || getManualInteractionMode() === "edit") {
         return;
       }
       event.preventDefault();
@@ -3275,7 +3540,7 @@ function handleViewerKeybind(event: KeyboardEvent): void {
       return;
     }
     if (event.ctrlKey && !event.shiftKey && (event.key === "y" || event.key === "Y")) {
-      if (getManualInteractionMode() === "anchor") {
+      if (getManualInteractionMode() === "anchor" || getManualInteractionMode() === "edit") {
         return;
       }
       event.preventDefault();
@@ -3292,7 +3557,11 @@ function handleViewerKeybind(event: KeyboardEvent): void {
         return;
       }
       event.preventDefault();
-      adjustDraftEdgeLength(1);
+      if (getManualInteractionMode() === "edit") {
+        adjustSelectedLineLength(1);
+      } else {
+        adjustDraftEdgeLength(1);
+      }
       return;
     }
     if (event.key === "ArrowDown" || event.key === "-" || event.key === "_") {
@@ -3300,11 +3569,25 @@ function handleViewerKeybind(event: KeyboardEvent): void {
         return;
       }
       event.preventDefault();
-      adjustDraftEdgeLength(-1);
+      if (getManualInteractionMode() === "edit") {
+        adjustSelectedLineLength(-1);
+      } else {
+        adjustDraftEdgeLength(-1);
+      }
       return;
     }
 
     const applyAxisSelection = (axis: ManualAxis, startsBackwards: boolean) => {
+      if (getManualInteractionMode() === "edit") {
+        if (manualEditSelectedLineIndex === null) {
+          setManualInteractionMode("draw");
+          manualAxisSelection = axis;
+          manualAxisStartsBackwards = startsBackwards;
+          return;
+        }
+        updateSelectedLineAxis(axis, startsBackwards);
+        return;
+      }
       if (getManualInteractionMode() === "anchor") {
         setManualInteractionMode("draw");
       }
@@ -3354,11 +3637,20 @@ function handleViewerKeybind(event: KeyboardEvent): void {
         return;
       }
       event.preventDefault();
+      if (getManualInteractionMode() === "edit") {
+        flipSelectedLineDirection();
+        return;
+      }
       manualDraftLine = {
         ...manualDraftLine,
         flipped: !manualDraftLine.flipped,
       };
       renderCropResultFromCache();
+      return;
+    }
+    if (event.key === "Tab" && getManualInteractionMode() === "edit") {
+      event.preventDefault();
+      flipSelectedLineDirection();
       return;
     }
   }
