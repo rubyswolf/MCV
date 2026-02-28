@@ -35,6 +35,22 @@ type McvImagePipelineArgs = {
 };
 
 type McvLineSegment = [number, number, number, number];
+type McvMediaApiSource = {
+  type: "video" | "image";
+  id: string;
+  name: string;
+  url: string;
+  youtube_id?: string;
+  seconds?: number;
+  frames?: number;
+};
+type McvUploadedVideoSource = {
+  type: "video";
+  filename: string;
+  seconds: number;
+  frames: number;
+};
+type McvDataSource = McvMediaApiSource | McvUploadedVideoSource;
 type ManualAxis = "x" | "y" | "z";
 type ManualPoint = {
   x: number;
@@ -197,6 +213,7 @@ declare global {
     MCV_DATA?: {
       annotations: ManualAnnotation[];
       structure: StructureData;
+      source?: McvDataSource;
     };
   }
 }
@@ -217,13 +234,20 @@ let currentAnalyzedImageObjectUrl: string | null = null;
 let viewerVideoNode: HTMLVideoElement | null = null;
 let viewerHmsInput: HTMLInputElement | null = null;
 let viewerEditingField: "hms" | null = null;
+let viewerActiveVideoContext: ViewerMedia | null = null;
 let pendingImportedMcvState:
   | {
       annotations: ManualAnnotation[];
       anchors: StructureAnchor[];
       vertices: StructureVertexData[];
+      source?: McvDataSource;
     }
   | null = null;
+let pendingImportedVideoSourceForImageLoad: McvDataSource | null = null;
+let hasUnsavedChanges = false;
+let analyzeOverwriteArmed = false;
+let backDiscardArmed = false;
+let activeAnalyzeButton: HTMLButtonElement | null = null;
 let launchSelectionIntent: LaunchSelectionIntent | null = null;
 let cropResultCache:
   | {
@@ -234,7 +258,7 @@ let cropResultCache:
   | null = null;
 let manualAxisSelection: ManualAxis = "x";
 let manualAxisStartsBackwards = false;
-const MCV_DATA: { annotations: ManualAnnotation[]; structure: StructureData } = {
+const MCV_DATA: { annotations: ManualAnnotation[]; structure: StructureData; source?: McvDataSource } = {
   annotations: [],
   structure: {
     lines: [],
@@ -693,6 +717,7 @@ function pushAnnotationWithStructureLink(annotation: ManualAnnotation): void {
   linkLineIndexAgainstOthers(MCV_DATA.structure.lines.length - 1);
   recomputeStructureGeometryFromConnections();
   syncStructureEndpointRefs();
+  markAnnotationsDirty();
 }
 
 function popAnnotationWithStructureUnlink(): ManualAnnotation | undefined {
@@ -729,6 +754,7 @@ function popAnnotationWithStructureUnlink(): ManualAnnotation | undefined {
   }
   recomputeStructureGeometryFromConnections();
   syncStructureEndpointRefs();
+  markAnnotationsDirty();
   return removed;
 }
 
@@ -761,6 +787,7 @@ function resetCropInteractionState(): void {
   vertexSolveRenderData = null;
   manualAxisStartsBackwards = false;
   renderAnnotationPreviewHeld = false;
+  clearAnnotationsDirty();
 }
 
 function isThenable(value: unknown): value is Promise<unknown> {
@@ -1130,6 +1157,10 @@ function getViewerTitleNode(): HTMLHeadingElement | null {
   return document.getElementById("viewer-title") as HTMLHeadingElement | null;
 }
 
+function getViewerBackButtonNode(): HTMLButtonElement | null {
+  return document.getElementById("viewer-back") as HTMLButtonElement | null;
+}
+
 function getViewerContentNode(): HTMLDivElement | null {
   return document.getElementById("viewer-content") as HTMLDivElement | null;
 }
@@ -1152,6 +1183,33 @@ function getViewerCropResultSvgNode(): SVGSVGElement | null {
     return null;
   }
   return cropResultNode.firstElementChild as SVGSVGElement | null;
+}
+
+function refreshUnsavedActionUi(): void {
+  const backButton = getViewerBackButtonNode();
+  if (backButton) {
+    backButton.textContent = backDiscardArmed ? "Confirm discarding changes" : "Back";
+  }
+  if (activeAnalyzeButton) {
+    activeAnalyzeButton.textContent = analyzeOverwriteArmed ? "Confirm overwrite" : "Analyze!";
+    activeAnalyzeButton.classList.toggle("warning", analyzeOverwriteArmed);
+  }
+}
+
+function clearUnsavedConfirmationArms(): void {
+  analyzeOverwriteArmed = false;
+  backDiscardArmed = false;
+  refreshUnsavedActionUi();
+}
+
+function markAnnotationsDirty(): void {
+  hasUnsavedChanges = true;
+  clearUnsavedConfirmationArms();
+}
+
+function clearAnnotationsDirty(): void {
+  hasUnsavedChanges = false;
+  clearUnsavedConfirmationArms();
 }
 
 function hideViewerCropResult(): void {
@@ -1313,6 +1371,13 @@ function showViewerFullImage(src: string, alt: string): void {
       updateViewerCursor();
     }
     scrollViewerFullImageIntoView();
+    if (pendingImportedVideoSourceForImageLoad) {
+      const source = pendingImportedVideoSourceForImageLoad;
+      pendingImportedVideoSourceForImageLoad = null;
+      window.setTimeout(() => {
+        mountImportedSourceVideoForCurrentImage(source);
+      }, 120);
+    }
   };
   stage.classList.remove("hidden");
   requestAnimationFrame(scrollViewerFullImageIntoView);
@@ -1617,6 +1682,7 @@ function updateSelectedAnchorCoordinatesFromInput(): void {
       delete vertex.z;
     }
   }
+  markAnnotationsDirty();
 }
 
 function tryHandleAnchorInputKey(event: KeyboardEvent): boolean {
@@ -2295,6 +2361,7 @@ function adjustSelectedLineLength(delta: number): void {
       delete structureLine.length;
     }
   }
+  markAnnotationsDirty();
   renderCropResultFromCache();
 }
 
@@ -2313,6 +2380,7 @@ function flipSelectedLineDirection(): void {
   line.to = nextTo;
   swapAnchorEndpointForLine(manualEditSelectedLineIndex);
   rebuildStructureFromAnnotations();
+  markAnnotationsDirty();
   renderCropResultFromCache();
 }
 
@@ -2334,6 +2402,7 @@ function updateSelectedLineAxis(axis: ManualAxis, startsBackwards: boolean): voi
     swapAnchorEndpointForLine(manualEditSelectedLineIndex);
   }
   rebuildStructureFromAnnotations();
+  markAnnotationsDirty();
   renderCropResultFromCache();
 }
 
@@ -2374,6 +2443,7 @@ function removeAnchorAtIndex(anchorIndex: number): void {
     }
   }
   syncStructureEndpointRefs();
+  markAnnotationsDirty();
   renderCropResultFromCache();
 }
 
@@ -2399,6 +2469,7 @@ function removeLineAtIndex(lineIndex: number): void {
   }
   manualRedoLines.length = 0;
   rebuildStructureFromAnnotations();
+  markAnnotationsDirty();
   renderCropResultFromCache();
 }
 
@@ -2678,6 +2749,7 @@ function createManualModeCropResultSvg(
         const createdIndex = createAnchorWithVertex(from, to);
         syncStructureEndpointRefs();
         setManualAnchorSelection(createdIndex);
+        markAnnotationsDirty();
       }
       event.preventDefault();
       renderCropResultFromCache();
@@ -2757,11 +2829,8 @@ function sizeCropResultElement(
   width: number,
   height: number
 ): void {
-  const stage = getViewerFullImageStageNode();
-  const stageRect = stage?.getBoundingClientRect();
   const availableWidth = Math.max(120, window.innerWidth - 24);
-  const viewportTop = stageRect ? Math.max(0, stageRect.top) : 0;
-  const availableHeight = Math.max(120, window.innerHeight - viewportTop - 12);
+  const availableHeight = Math.max(120, window.innerHeight - 24);
   const scale = Math.max(0.01, Math.min(availableWidth / width, availableHeight / height));
   element.style.width = `${Math.floor(width * scale)}px`;
   element.style.height = `${Math.floor(height * scale)}px`;
@@ -3166,6 +3235,86 @@ function findMediaById(id: string): ViewerMedia | null {
   return null;
 }
 
+function splitSecondsAndFrames(secondsValue: number): { seconds: number; frames: number } {
+  const safe = Math.max(0, Number.isFinite(secondsValue) ? secondsValue : 0);
+  const seconds = Math.floor(safe);
+  const fractional = safe - seconds;
+  const frames = Math.max(0, Math.min(VIEWER_FPS - 1, Math.floor(fractional * VIEWER_FPS + 1e-6)));
+  return { seconds, frames };
+}
+
+function buildMcvSourceFromViewer(viewer: ViewerMedia): McvDataSource | null {
+  if (viewer.id === "raw-url" || viewer.id === "upload-file") {
+    return null;
+  }
+  if (viewer.tab === "videos") {
+    const videoEntry = mediaLibrary.videos[viewer.id];
+    if (!videoEntry) {
+      return null;
+    }
+    const source: McvDataSource = {
+      type: "video",
+      id: viewer.id,
+      name: videoEntry.name,
+      url: videoEntry.url,
+      ...(videoEntry.youtube_id ? { youtube_id: videoEntry.youtube_id } : {}),
+    };
+    if (viewer.initialSeekSeconds !== undefined) {
+      const { seconds, frames } = splitSecondsAndFrames(viewer.initialSeekSeconds);
+      source.seconds = seconds;
+      source.frames = frames;
+    }
+    return source;
+  }
+  if (viewer.tab === "images") {
+    const imageEntry = mediaLibrary.images[viewer.id];
+    if (!imageEntry) {
+      return null;
+    }
+    return {
+      type: "image",
+      id: viewer.id,
+      name: imageEntry.name,
+      url: imageEntry.url,
+    };
+  }
+  return null;
+}
+
+function resolveVideoViewerFromSource(source: McvDataSource): ViewerMedia | null {
+  if (source.type !== "video") {
+    return null;
+  }
+  if (!("id" in source) || !("url" in source)) {
+    return null;
+  }
+  const byId = findMediaById(source.id);
+  if (byId && byId.kind === "video") {
+    return byId;
+  }
+  if (source.youtube_id) {
+    const byYoutube = findVideoByYoutubeId(source.youtube_id);
+    if (byYoutube) {
+      return {
+        tab: "videos",
+        id: byYoutube.id,
+        kind: "video",
+        title: byYoutube.item.name,
+        url: byYoutube.item.url,
+        ...(byYoutube.item.youtube_id ? { youtubeId: byYoutube.item.youtube_id } : {}),
+      };
+    }
+  }
+  const normalizedSourceUrl = normalizePossibleUrl(source.url);
+  if (normalizedSourceUrl) {
+    const byUrl = findMediaByNormalizedUrl(normalizedSourceUrl);
+    if (byUrl && byUrl.kind === "video") {
+      return byUrl;
+    }
+  }
+  return null;
+}
+
 function parseLaunchSelectionIntent(): LaunchSelectionIntent | null {
   const candidates: string[] = [];
 
@@ -3541,6 +3690,52 @@ function normalizeImportedAxis(value: unknown): ManualAxis | null {
   return value === "x" || value === "y" || value === "z" ? value : null;
 }
 
+function normalizeImportedSource(value: unknown): McvDataSource | undefined {
+  if (typeof value !== "object" || value === null) {
+    return undefined;
+  }
+  const item = value as Record<string, unknown>;
+  if (item.type === "video" && typeof item.filename === "string") {
+    const seconds =
+      typeof item.seconds === "number" && Number.isFinite(item.seconds) && item.seconds >= 0
+        ? Math.floor(item.seconds)
+        : 0;
+    const frames =
+      typeof item.frames === "number" && Number.isFinite(item.frames) && item.frames >= 0
+        ? Math.floor(item.frames)
+        : 0;
+    return {
+      type: "video",
+      filename: item.filename,
+      seconds,
+      frames,
+    };
+  }
+  const type = item.type;
+  const id = item.id;
+  const name = item.name;
+  const url = item.url;
+  if ((type !== "video" && type !== "image") || typeof id !== "string" || typeof name !== "string" || typeof url !== "string") {
+    return undefined;
+  }
+  const source: McvDataSource = {
+    type,
+    id,
+    name,
+    url,
+  };
+  if (type === "video" && typeof item.youtube_id === "string" && item.youtube_id.trim()) {
+    source.youtube_id = item.youtube_id;
+  }
+  if (type === "video" && typeof item.seconds === "number" && Number.isFinite(item.seconds) && item.seconds >= 0) {
+    source.seconds = Math.floor(item.seconds);
+  }
+  if (type === "video" && typeof item.frames === "number" && Number.isFinite(item.frames) && item.frames >= 0) {
+    source.frames = Math.floor(item.frames);
+  }
+  return source;
+}
+
 function normalizeImportedLineRefs(value: unknown, maxLines: number): number[] {
   if (!Array.isArray(value)) {
     return [];
@@ -3556,6 +3751,7 @@ function normalizeImportedMcvData(value: unknown): {
   annotations: ManualAnnotation[];
   anchors: StructureAnchor[];
   vertices: StructureVertexData[];
+  source?: McvDataSource;
 } | null {
   if (typeof value !== "object" || value === null) {
     return null;
@@ -3687,13 +3883,21 @@ function normalizeImportedMcvData(value: unknown): {
     }
   });
 
-  return { annotations, anchors: parsedAnchors, vertices };
+  const source = normalizeImportedSource(data.source);
+
+  return {
+    annotations,
+    anchors: parsedAnchors,
+    vertices,
+    ...(source ? { source } : {}),
+  };
 }
 
 function applyImportedMcvState(data: {
   annotations: ManualAnnotation[];
   anchors: StructureAnchor[];
   vertices: StructureVertexData[];
+  source?: McvDataSource;
 }): void {
   MCV_DATA.annotations = data.annotations.map((line) => ({
     from: { x: line.from.x, y: line.from.y },
@@ -3717,6 +3921,11 @@ function applyImportedMcvState(data: {
     ...(vertex.y !== undefined ? { y: vertex.y } : {}),
     ...(vertex.z !== undefined ? { z: vertex.z } : {}),
   }));
+  if (data.source) {
+    MCV_DATA.source = { ...data.source };
+  } else {
+    delete MCV_DATA.source;
+  }
   rebuildStructureFromAnnotations();
   manualRedoLines.length = 0;
   manualDraftLine = null;
@@ -3733,6 +3942,7 @@ function applyImportedMcvState(data: {
   manualEditSelectedLineIndex = null;
   vertexSolveRenderData = null;
   renderAnnotationPreviewHeld = false;
+  clearAnnotationsDirty();
 }
 
 async function tryLoadMcvSvgFile(file: File): Promise<{ imageDataUrl: string; data: unknown } | null> {
@@ -3782,7 +3992,7 @@ async function tryLoadMcvSvgFile(file: File): Promise<{ imageDataUrl: string; da
 }
 
 async function saveCurrentStateAsSvg(): Promise<void> {
-  if (!cropResultCache || !viewerMedia || viewerMedia.kind !== "image") {
+  if (!cropResultCache || !viewerMedia) {
     return;
   }
   const width = cropResultCache.width;
@@ -3859,11 +4069,13 @@ async function saveCurrentStateAsSvg(): Promise<void> {
   download.click();
   document.body.removeChild(download);
   URL.revokeObjectURL(objectUrl);
+  clearAnnotationsDirty();
 }
 
 async function handleUploadedFile(file: File): Promise<void> {
   selectedUploadFilename = file.name;
   pendingImportedMcvState = null;
+  pendingImportedVideoSourceForImageLoad = null;
   if (isSvgFile(file)) {
     try {
       const parsed = await tryLoadMcvSvgFile(file);
@@ -3871,6 +4083,9 @@ async function handleUploadedFile(file: File): Promise<void> {
         const normalized = normalizeImportedMcvData(parsed.data);
         if (normalized) {
           pendingImportedMcvState = normalized;
+          if (normalized.source?.type === "video") {
+            pendingImportedVideoSourceForImageLoad = normalized.source;
+          }
           openViewer({
             tab: "upload",
             id: "upload-file",
@@ -3965,7 +4180,7 @@ function seekViewerFromInput(): void {
 }
 
 function getCurrentViewerTimeParts(): { seconds: number; frame: number } {
-  if (!viewerVideoNode || !viewerMedia || viewerMedia.kind !== "video") {
+  if (!viewerVideoNode || !viewerActiveVideoContext) {
     return { seconds: 0, frame: 0 };
   }
   const safeTime = Math.max(0, Number.isFinite(viewerVideoNode.currentTime) ? viewerVideoNode.currentTime : 0);
@@ -3973,6 +4188,39 @@ function getCurrentViewerTimeParts(): { seconds: number; frame: number } {
   const fractional = safeTime - wholeSeconds;
   const frame = Math.max(0, Math.min(VIEWER_FPS - 1, Math.floor(fractional * VIEWER_FPS + 1e-6)));
   return { seconds: wholeSeconds, frame };
+}
+
+function updateMcvSourceVideoTimestampFromCurrentViewer(): void {
+  if (!viewerActiveVideoContext || viewerActiveVideoContext.kind !== "video") {
+    return;
+  }
+  const { seconds, frame } = getCurrentViewerTimeParts();
+  if (viewerActiveVideoContext.id === "upload-file") {
+    MCV_DATA.source = {
+      type: "video",
+      filename: viewerActiveVideoContext.title,
+      seconds,
+      frames: frame,
+    };
+    return;
+  }
+  if (!MCV_DATA.source || MCV_DATA.source.type !== "video") {
+    return;
+  }
+  if (!("id" in MCV_DATA.source) || !("url" in MCV_DATA.source)) {
+    return;
+  }
+  const sameVideo =
+    MCV_DATA.source.id === viewerActiveVideoContext.id ||
+    (MCV_DATA.source.youtube_id && viewerActiveVideoContext.youtubeId
+      ? MCV_DATA.source.youtube_id === viewerActiveVideoContext.youtubeId
+      : false) ||
+    normalizePossibleUrl(MCV_DATA.source.url) === normalizePossibleUrl(viewerActiveVideoContext.url);
+  if (!sameVideo) {
+    return;
+  }
+  MCV_DATA.source.seconds = seconds;
+  MCV_DATA.source.frames = frame;
 }
 
 function getShareBaseUrl(): URL {
@@ -3996,7 +4244,8 @@ function getShareBaseUrl(): URL {
 }
 
 function buildViewerShareUrl(): string | null {
-  if (!viewerMedia) {
+  const context = viewerActiveVideoContext;
+  if (!context) {
     return null;
   }
   const shareUrl = getShareBaseUrl();
@@ -4005,13 +4254,13 @@ function buildViewerShareUrl(): string | null {
 
   const { seconds, frame } = getCurrentViewerTimeParts();
   const preferredId =
-    viewerMedia.id && viewerMedia.id !== "raw-url" && viewerMedia.id !== "upload-file"
-      ? viewerMedia.id
+    context.id && context.id !== "raw-url" && context.id !== "upload-file"
+      ? context.id
       : "";
   if (preferredId) {
     shareUrl.searchParams.set("id", preferredId);
-  } else if (viewerMedia.youtubeId) {
-    shareUrl.searchParams.set("yt", viewerMedia.youtubeId);
+  } else if (context.youtubeId) {
+    shareUrl.searchParams.set("yt", context.youtubeId);
   } else {
     return null;
   }
@@ -4050,12 +4299,12 @@ async function copyViewerShareLink(copyButton: HTMLButtonElement | null): Promis
 }
 
 function buildViewerYoutubeUrl(): string | null {
-  if (!viewerMedia?.youtubeId) {
+  if (!viewerActiveVideoContext?.youtubeId) {
     return null;
   }
   const { seconds } = getCurrentViewerTimeParts();
   const ytUrl = new URL("https://www.youtube.com/watch");
-  ytUrl.searchParams.set("v", viewerMedia.youtubeId);
+  ytUrl.searchParams.set("v", viewerActiveVideoContext.youtubeId);
   ytUrl.searchParams.set("t", String(seconds));
   return ytUrl.toString();
 }
@@ -4068,116 +4317,40 @@ function openViewerInYoutube(): void {
   window.open(ytUrl, "_blank", "noopener,noreferrer");
 }
 
-function getAnalyzedFrameTitle(): string {
-  const { seconds, frame } = getCurrentViewerTimeParts();
-  const sourceTitle = viewerMedia?.title ? ` from ${viewerMedia.title}` : "";
-  return `Frame${sourceTitle} @ ${formatTimestamp(seconds)}|${frame}`;
-}
-
-async function captureViewerFrameObjectUrl(): Promise<string> {
-  if (!viewerVideoNode) {
-    throw new Error("No active video");
+function renderVideoViewerUi(
+  contentNode: HTMLDivElement,
+  videoContext: ViewerMedia,
+  options?: {
+    containerRole?: string;
+    sourceLabel?: string;
   }
-  const width = Math.floor(viewerVideoNode.videoWidth);
-  const height = Math.floor(viewerVideoNode.videoHeight);
-  if (width <= 0 || height <= 0) {
-    throw new Error("Video metadata is not ready yet");
-  }
-
-  const canvas = document.createElement("canvas");
-  canvas.width = width;
-  canvas.height = height;
-  const context = canvas.getContext("2d");
-  if (!context) {
-    throw new Error("Canvas context unavailable");
-  }
-  context.drawImage(viewerVideoNode, 0, 0, width, height);
-
-  const blob = await new Promise<Blob>((resolve, reject) => {
-    canvas.toBlob((nextBlob) => {
-      if (!nextBlob) {
-        reject(new Error("Failed to encode frame"));
-        return;
-      }
-      resolve(nextBlob);
-    }, "image/png");
-  });
-  return URL.createObjectURL(blob);
-}
-
-async function analyzeViewerFrame(analyzeButton: HTMLButtonElement | null): Promise<void> {
-  const originalLabel = analyzeButton?.textContent || "Analyze!";
-  const setLabel = (label: string) => {
-    if (analyzeButton) {
-      analyzeButton.textContent = label;
+): void {
+  if (options?.containerRole) {
+    const existing = contentNode.querySelector(`[data-role="${options.containerRole}"]`);
+    if (existing) {
+      existing.remove();
     }
-  };
-  const resetLabelSoon = () => {
-    window.setTimeout(() => {
-      setLabel(originalLabel);
-    }, 1600);
-  };
-
-  setLabel("Extracting...");
-  try {
-    const frameObjectUrl = await captureViewerFrameObjectUrl();
-    revokeAnalyzedImageObjectUrl();
-    currentAnalyzedImageObjectUrl = frameObjectUrl;
-    showViewerFullImage(frameObjectUrl, getAnalyzedFrameTitle());
-    setLabel("Analyze!");
-  } catch (error) {
-    const name = (error as { name?: string } | null)?.name || "";
-    if (name === "SecurityError") {
-      setLabel("CORS blocked");
-    } else {
-      setLabel("Analyze failed");
-    }
-    resetLabelSoon();
-  }
-}
-
-function closeViewer(): void {
-  viewerMedia = null;
-  viewerVideoNode = null;
-  viewerHmsInput = null;
-  viewerEditingField = null;
-  clearViewerFullImage();
-  revokeAnalyzedImageObjectUrl();
-  revokeViewerObjectUrl();
-  setViewerMode(false);
-}
-
-function renderViewerScreen(): void {
-  if (!viewerMedia) {
-    setViewerMode(false);
-    return;
   }
 
-  const titleNode = getViewerTitleNode();
-  const contentNode = getViewerContentNode();
-  if (!titleNode || !contentNode) {
-    return;
+  const panel = document.createElement("div");
+  panel.className = "viewer-video-panel";
+  if (options?.containerRole) {
+    panel.setAttribute("data-role", options.containerRole);
   }
-
-  titleNode.textContent = viewerMedia.title;
-  contentNode.replaceChildren();
-
-  if (viewerMedia.kind === "image") {
-    clearMediaError();
-    showViewerFullImage(viewerMedia.url, viewerMedia.title);
-    setViewerMode(true);
-    return;
+  if (options?.sourceLabel) {
+    const sourceLabel = document.createElement("div");
+    sourceLabel.className = "time-label";
+    sourceLabel.textContent = options.sourceLabel;
+    panel.appendChild(sourceLabel);
   }
-
-  clearViewerFullImage();
 
   const videoNode = document.createElement("video");
   videoNode.className = "viewer-video";
   videoNode.controls = true;
   videoNode.preload = "metadata";
   videoNode.crossOrigin = "anonymous";
-  videoNode.src = viewerMedia.url;
-  contentNode.appendChild(videoNode);
+  videoNode.src = videoContext.url;
+  panel.appendChild(videoNode);
 
   const controlsNode = document.createElement("div");
   controlsNode.className = "time-controls";
@@ -4204,7 +4377,7 @@ function renderViewerScreen(): void {
   });
   hmsInputRow.appendChild(copyLinkButton);
 
-  if (viewerMedia.youtubeId) {
+  if (videoContext.youtubeId) {
     const openInYtButton = document.createElement("button");
     openInYtButton.type = "button";
     openInYtButton.className = "viewer-action-button";
@@ -4223,13 +4396,15 @@ function renderViewerScreen(): void {
     void analyzeViewerFrame(analyzeButton);
   });
   hmsInputRow.appendChild(analyzeButton);
+  activeAnalyzeButton = analyzeButton;
 
   hmsRow.appendChild(hmsLabel);
   hmsRow.appendChild(hmsInputRow);
 
   controlsNode.appendChild(hmsRow);
-  contentNode.appendChild(controlsNode);
+  panel.appendChild(controlsNode);
 
+  viewerActiveVideoContext = videoContext;
   viewerVideoNode = videoNode;
   viewerHmsInput = hmsInput;
   viewerEditingField = null;
@@ -4271,18 +4446,176 @@ function renderViewerScreen(): void {
     });
   });
 
+  if (videoContext.timestampLabel) {
+    hmsInput.value = videoContext.timestampLabel;
+  }
   videoNode.addEventListener("loadedmetadata", () => {
-    if (!viewerMedia || viewerVideoNode !== videoNode) {
+    if (viewerVideoNode !== videoNode) {
       return;
     }
-    if (viewerMedia.initialSeekSeconds !== undefined) {
-      videoNode.currentTime = clampVideoTime(videoNode, viewerMedia.initialSeekSeconds);
-      viewerMedia.initialSeekSeconds = undefined;
+    if (videoContext.initialSeekSeconds !== undefined) {
+      videoNode.currentTime = clampVideoTime(videoNode, videoContext.initialSeekSeconds);
+      videoContext.initialSeekSeconds = undefined;
     }
     syncViewerTimeInputs(true);
   });
 
   syncViewerTimeInputs(true);
+  contentNode.appendChild(panel);
+  refreshUnsavedActionUi();
+}
+
+function mountImportedSourceVideoForCurrentImage(source: McvDataSource, attempt = 0): void {
+  if (!viewerMedia || viewerMedia.kind !== "image") {
+    return;
+  }
+  const viewerContent = getViewerContentNode();
+  if (!viewerContent) {
+    return;
+  }
+  const linkedVideo = resolveVideoViewerFromSource(source);
+  if (!linkedVideo) {
+    if (mediaLoadState === "fetching" && attempt < 12) {
+      window.setTimeout(() => {
+        mountImportedSourceVideoForCurrentImage(source, attempt + 1);
+      }, 250);
+    }
+    return;
+  }
+  if (source.seconds !== undefined || source.frames !== undefined) {
+    linkedVideo.initialSeekSeconds = Math.max(0, source.seconds ?? 0) + Math.max(0, source.frames ?? 0) / VIEWER_FPS;
+    linkedVideo.timestampLabel = `${formatTimestamp(Math.max(0, source.seconds ?? 0))}|${Math.max(0, source.frames ?? 0)}`;
+  }
+  renderVideoViewerUi(viewerContent, linkedVideo, {
+    containerRole: "linked-video-source",
+    sourceLabel: `Source video: ${linkedVideo.title}`,
+  });
+}
+
+function getAnalyzedFrameTitle(): string {
+  const { seconds, frame } = getCurrentViewerTimeParts();
+  const sourceTitle = viewerActiveVideoContext?.title ? ` from ${viewerActiveVideoContext.title}` : "";
+  return `Frame${sourceTitle} @ ${formatTimestamp(seconds)}|${frame}`;
+}
+
+async function captureViewerFrameObjectUrl(): Promise<string> {
+  if (!viewerVideoNode) {
+    throw new Error("No active video");
+  }
+  const width = Math.floor(viewerVideoNode.videoWidth);
+  const height = Math.floor(viewerVideoNode.videoHeight);
+  if (width <= 0 || height <= 0) {
+    throw new Error("Video metadata is not ready yet");
+  }
+
+  const canvas = document.createElement("canvas");
+  canvas.width = width;
+  canvas.height = height;
+  const context = canvas.getContext("2d");
+  if (!context) {
+    throw new Error("Canvas context unavailable");
+  }
+  context.drawImage(viewerVideoNode, 0, 0, width, height);
+
+  const blob = await new Promise<Blob>((resolve, reject) => {
+    canvas.toBlob((nextBlob) => {
+      if (!nextBlob) {
+        reject(new Error("Failed to encode frame"));
+        return;
+      }
+      resolve(nextBlob);
+    }, "image/png");
+  });
+  return URL.createObjectURL(blob);
+}
+
+async function analyzeViewerFrame(analyzeButton: HTMLButtonElement | null): Promise<void> {
+  if (hasUnsavedChanges && !analyzeOverwriteArmed) {
+    analyzeOverwriteArmed = true;
+    backDiscardArmed = false;
+    refreshUnsavedActionUi();
+    return;
+  }
+  analyzeOverwriteArmed = false;
+  refreshUnsavedActionUi();
+
+  const originalLabel = analyzeButton?.textContent || "Analyze!";
+  const setLabel = (label: string) => {
+    if (analyzeButton) {
+      analyzeButton.textContent = label;
+    }
+  };
+  const resetLabelSoon = () => {
+    window.setTimeout(() => {
+      setLabel(originalLabel);
+    }, 1600);
+  };
+
+  setLabel("Extracting...");
+  try {
+    updateMcvSourceVideoTimestampFromCurrentViewer();
+    const frameObjectUrl = await captureViewerFrameObjectUrl();
+    revokeAnalyzedImageObjectUrl();
+    currentAnalyzedImageObjectUrl = frameObjectUrl;
+    showViewerFullImage(frameObjectUrl, getAnalyzedFrameTitle());
+    setLabel("Analyze!");
+    clearAnnotationsDirty();
+  } catch (error) {
+    const name = (error as { name?: string } | null)?.name || "";
+    if (name === "SecurityError") {
+      setLabel("CORS blocked");
+    } else {
+      setLabel("Analyze failed");
+    }
+    resetLabelSoon();
+  }
+}
+
+function closeViewer(): void {
+  viewerMedia = null;
+  viewerVideoNode = null;
+  viewerHmsInput = null;
+  viewerEditingField = null;
+  viewerActiveVideoContext = null;
+  activeAnalyzeButton = null;
+  pendingImportedVideoSourceForImageLoad = null;
+  clearViewerFullImage();
+  revokeAnalyzedImageObjectUrl();
+  revokeViewerObjectUrl();
+  setViewerMode(false);
+  refreshUnsavedActionUi();
+}
+
+function renderViewerScreen(): void {
+  if (!viewerMedia) {
+    setViewerMode(false);
+    return;
+  }
+
+  const titleNode = getViewerTitleNode();
+  const contentNode = getViewerContentNode();
+  if (!titleNode || !contentNode) {
+    return;
+  }
+
+  titleNode.textContent = viewerMedia.title;
+  contentNode.replaceChildren();
+  activeAnalyzeButton = null;
+  viewerVideoNode = null;
+  viewerHmsInput = null;
+  viewerEditingField = null;
+  viewerActiveVideoContext = null;
+  refreshUnsavedActionUi();
+
+  if (viewerMedia.kind === "image") {
+    clearMediaError();
+    showViewerFullImage(viewerMedia.url, viewerMedia.title);
+    setViewerMode(true);
+    return;
+  }
+
+  clearViewerFullImage();
+  renderVideoViewerUi(contentNode, viewerMedia);
   setViewerMode(true);
 }
 
@@ -4293,6 +4626,12 @@ function openViewer(nextViewer: ViewerMedia): void {
     currentViewerObjectUrl = nextViewer.url;
   } else {
     revokeViewerObjectUrl();
+  }
+  const source = buildMcvSourceFromViewer(nextViewer);
+  if (source) {
+    MCV_DATA.source = source;
+  } else {
+    delete MCV_DATA.source;
   }
   viewerMedia = nextViewer;
   renderViewerScreen();
@@ -4471,7 +4810,7 @@ function handleViewerKeybind(event: KeyboardEvent): void {
       target.tagName === "TEXTAREA" ||
       target.isContentEditable);
 
-  if (cropResultCache && viewerMedia?.kind === "image" && !targetIsEditable) {
+  if (cropResultCache && !targetIsEditable) {
     if (event.ctrlKey && !event.shiftKey && (event.key === "s" || event.key === "S")) {
       event.preventDefault();
       void saveCurrentStateAsSvg();
@@ -4682,7 +5021,7 @@ function handleViewerKeybind(event: KeyboardEvent): void {
     }
   }
 
-  if (!viewerVideoNode || !viewerMedia || viewerMedia.kind !== "video") {
+  if (!viewerVideoNode || !viewerActiveVideoContext || viewerActiveVideoContext.kind !== "video") {
     return;
   }
   if (viewerEditingField) {
@@ -4805,10 +5144,24 @@ function installUiHandlers(): void {
   }
   if (viewerBackButton) {
     viewerBackButton.addEventListener("click", () => {
+      if (hasUnsavedChanges && !backDiscardArmed) {
+        backDiscardArmed = true;
+        analyzeOverwriteArmed = false;
+        refreshUnsavedActionUi();
+        return;
+      }
+      backDiscardArmed = false;
       closeViewer();
       renderMediaBox();
     });
   }
+  window.addEventListener("beforeunload", (event) => {
+    if (!hasUnsavedChanges) {
+      return;
+    }
+    event.preventDefault();
+    event.returnValue = "";
+  });
   document.addEventListener("keydown", handleViewerKeybind);
   document.addEventListener("keydown", (event) => {
     const target = event.target as HTMLElement | null;
@@ -4820,7 +5173,7 @@ function installUiHandlers(): void {
     if (event.code === "Backquote" && !targetIsEditable) {
       if (!renderAnnotationPreviewHeld) {
         renderAnnotationPreviewHeld = true;
-        if (cropResultCache && viewerMedia?.kind === "image") {
+        if (cropResultCache) {
           renderCropResultFromCache();
         }
       }
@@ -4842,7 +5195,7 @@ function installUiHandlers(): void {
     if (event.code === "Backquote") {
       if (renderAnnotationPreviewHeld) {
         renderAnnotationPreviewHeld = false;
-        if (cropResultCache && viewerMedia?.kind === "image") {
+        if (cropResultCache) {
           renderCropResultFromCache();
         }
       }
@@ -4865,7 +5218,7 @@ function installUiHandlers(): void {
     releaseViewerGrab();
     if (renderAnnotationPreviewHeld) {
       renderAnnotationPreviewHeld = false;
-      if (cropResultCache && viewerMedia?.kind === "image") {
+      if (cropResultCache) {
         renderCropResultFromCache();
       }
     }
