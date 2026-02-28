@@ -318,6 +318,7 @@ let manualEditHoveredLineIndex: number | null = null;
 let manualEditSelectedLineIndex: number | null = null;
 let vertexSolveRenderData: VertexSolveRenderData | null = null;
 let vertexSolveHoveredVertexIndex: number | null = null;
+let poseSolveReferenceInput = "";
 let poseSolveState:
   | {
       status: "idle" | "running" | "done" | "error";
@@ -1806,6 +1807,29 @@ function formatPoseNumber(value: number): string {
   return Number.isFinite(value) ? value.toFixed(6) : "nan";
 }
 
+function parsePoseReferenceInput(
+  raw: string
+): { x: number; y: number; z: number; yaw: number; pitch: number } | null {
+  const tokens = raw
+    .trim()
+    .split(/[\s,]+/)
+    .filter((token) => token.length > 0);
+  if (tokens.length !== 5) {
+    return null;
+  }
+  const values = tokens.map((token) => Number(token));
+  if (values.some((value) => !Number.isFinite(value))) {
+    return null;
+  }
+  return {
+    x: values[0],
+    y: values[1],
+    z: values[2],
+    yaw: values[3],
+    pitch: values[4],
+  };
+}
+
 function appendPoseReportRow(parent: HTMLElement, label: string, value: string): void {
   const row = document.createElement("div");
   row.className = "pose-report-row";
@@ -1926,6 +1950,47 @@ function renderPoseSolvePanel(): void {
     "Rotation (yaw, pitch)",
     `${formatPoseNumber(result.rotation.yaw)}, ${formatPoseNumber(result.rotation.pitch)}`
   );
+
+  const referenceLabel = document.createElement("div");
+  referenceLabel.className = "time-label";
+  referenceLabel.textContent = "Reference (x y z yaw pitch)";
+  panel.appendChild(referenceLabel);
+
+  const referenceInput = document.createElement("input");
+  referenceInput.type = "text";
+  referenceInput.className = "time-input";
+  referenceInput.placeholder = "x y z yaw pitch";
+  referenceInput.value = poseSolveReferenceInput;
+  panel.appendChild(referenceInput);
+
+  const referenceStats = document.createElement("div");
+  referenceStats.className = "pose-report-stats";
+  panel.appendChild(referenceStats);
+
+  const updateReferenceStats = () => {
+    poseSolveReferenceInput = referenceInput.value;
+    referenceStats.replaceChildren();
+    const parsed = parsePoseReferenceInput(poseSolveReferenceInput);
+    if (!parsed) {
+      const note = document.createElement("div");
+      note.className = "pose-report-value";
+      note.textContent = "Enter 5 numbers: x y z yaw pitch";
+      referenceStats.appendChild(note);
+      return;
+    }
+    const dx = result.player_position.x - parsed.x;
+    const dy = result.player_position.y - parsed.y;
+    const dz = result.player_position.z - parsed.z;
+    const posError = Math.hypot(dx, dy, dz);
+    const yawErr = Math.abs(wrapDegrees180(result.rotation.yaw - parsed.yaw));
+    const pitchErr = Math.abs(result.rotation.pitch - parsed.pitch);
+    const rotError = Math.hypot(yawErr, pitchErr);
+    appendPoseReportRow(referenceStats, "Position error distance", `${formatPoseNumber(posError)} blocks`);
+    appendPoseReportRow(referenceStats, "Rotation error distance", `${formatPoseNumber(rotError)} deg`);
+  };
+
+  referenceInput.addEventListener("input", updateReferenceStats);
+  updateReferenceStats();
 }
 
 function updateViewerCursor(): void {
