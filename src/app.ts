@@ -1202,6 +1202,16 @@ function getAxisColor(axis: ManualAxis): string {
   return "#4da1ff";
 }
 
+function getAxisLightColor(axis: ManualAxis): string {
+  if (axis === "x") {
+    return "#ff9a9a";
+  }
+  if (axis === "y") {
+    return "#a6ffb3";
+  }
+  return "#9ec7ff";
+}
+
 function getAxisMarkerId(axis: ManualAxis): string {
   return `mcv-arrow-${axis}`;
 }
@@ -1266,6 +1276,46 @@ function getCropPointFromClient(
   };
 }
 
+function getDraftAsAnnotation(draft: DraftManualLine): ManualAnnotation {
+  const from = draft.flipped ? draft.to : draft.from;
+  const to = draft.flipped ? draft.from : draft.to;
+  return {
+    from: { x: from.x, y: from.y },
+    to: { x: to.x, y: to.y },
+    axis: draft.axis,
+    ...(draft.length !== undefined && draft.length > 0 ? { length: draft.length } : {}),
+  };
+}
+
+function annotationsWouldLink(first: ManualAnnotation, second: ManualAnnotation, threshold: number): boolean {
+  if (first.axis === second.axis) {
+    return false;
+  }
+  const firstPoints = [first.from, first.to];
+  const secondPoints = [second.from, second.to];
+  for (const firstPoint of firstPoints) {
+    for (const secondPoint of secondPoints) {
+      const distance = Math.hypot(firstPoint.x - secondPoint.x, firstPoint.y - secondPoint.y);
+      if (distance <= threshold) {
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
+function getDraftPotentialLinkIndexes(draft: DraftManualLine): Set<number> {
+  const potential = new Set<number>();
+  const draftAnnotation = getDraftAsAnnotation(draft);
+  const threshold = computeStructureLinkThreshold([...MCV_DATA.annotations, draftAnnotation]);
+  for (let index = 0; index < MCV_DATA.annotations.length; index += 1) {
+    if (annotationsWouldLink(draftAnnotation, MCV_DATA.annotations[index], threshold)) {
+      potential.add(index);
+    }
+  }
+  return potential;
+}
+
 function createManualModeCropResultSvg(
   width: number,
   height: number,
@@ -1278,11 +1328,12 @@ function createManualModeCropResultSvg(
     return svg;
   }
 
+  const potentialLinkIndexes = manualDraftLine ? getDraftPotentialLinkIndexes(manualDraftLine) : new Set<number>();
   const linesToRender: Array<ManualAnnotation | StructureLine> = renderAnnotationPreviewHeld
     ? MCV_DATA.annotations
     : MCV_DATA.structure.lines;
-  for (const line of linesToRender) {
-    const axisColor = getAxisColor(line.axis);
+  linesToRender.forEach((line, index) => {
+    const axisColor = potentialLinkIndexes.has(index) ? getAxisLightColor(line.axis) : getAxisColor(line.axis);
     const segment = getLineSegmentForLine(line);
     appendSvgLine(
       sceneGroup,
@@ -1293,7 +1344,7 @@ function createManualModeCropResultSvg(
       getAxisMarkerId(line.axis)
     );
     appendSvgLineLabel(sceneGroup, segment, line.length, axisColor);
-  }
+  });
   if (manualDraftLine) {
     const draftSegment = getLineSegmentForDraft(manualDraftLine);
     const axisColor = getAxisColor(manualDraftLine.axis);
