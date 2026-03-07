@@ -286,6 +286,7 @@ let viewerEditingField: "hms" | null = null;
 let viewerActiveVideoContext: ViewerMedia | null = null;
 let viewerDetectedFps: number | null = null;
 let stopViewerFpsProbe: (() => void) | null = null;
+let viewerImageRenderToken = 0;
 let pendingImportedMcvState:
   | {
       annotations: ManualAnnotation[];
@@ -1224,6 +1225,7 @@ function startViewerMotionLoop(): void {
 }
 
 function clearViewerFullImage(): void {
+  viewerImageRenderToken += 1;
   const stage = getViewerFullImageStageNode();
   const image = getViewerFullImageNode();
   if (image) {
@@ -1257,6 +1259,7 @@ function scrollViewerFullImageIntoView(): void {
 }
 
 function showViewerFullImage(src: string, alt: string): void {
+  const renderToken = ++viewerImageRenderToken;
   const stage = getViewerFullImageStageNode();
   const image = getViewerFullImageNode();
   if (!stage || !image) {
@@ -1270,12 +1273,27 @@ function showViewerFullImage(src: string, alt: string): void {
   image.classList.remove("hidden");
   image.src = src;
   image.alt = alt;
-  image.onload = () => {
+  image.onload = async () => {
+    if (renderToken !== viewerImageRenderToken) {
+      return;
+    }
     const width = image.naturalWidth || image.width;
     const height = image.naturalHeight || image.height;
     if (width > 0 && height > 0) {
+      let colorDataUrl = src;
+      if (src.startsWith("blob:")) {
+        try {
+          // Convert blob URLs once so drag-time SVG rerenders don't keep re-requesting blob resources.
+          colorDataUrl = await MediaUtils.ensureEmbeddedImageDataUrl(src);
+        } catch {
+          colorDataUrl = src;
+        }
+        if (renderToken !== viewerImageRenderToken) {
+          return;
+        }
+      }
       cropResultCache = {
-        colorDataUrl: src,
+        colorDataUrl,
         width,
         height,
       };
