@@ -405,12 +405,6 @@ function startViewerFrameRateProbe(video: HTMLVideoElement): void {
   stopViewerFpsProbe = stopFn || null;
 }
 
-
-
-
-
-
-
 function linkStructureEndpoints(
   firstLine: StructureLine,
   firstEndpoint: "from" | "to",
@@ -447,12 +441,6 @@ function createStructureLineFromAnnotation(annotation: ManualAnnotation): Struct
     ...(annotation.length !== undefined && annotation.length > 0 ? { length: annotation.length } : {}),
   };
 }
-
-
-
-
-
-
 
 function syncStructureEndpointRefs(): void {
   MCV_DATA.structure.lines.forEach((line) => {
@@ -584,12 +572,6 @@ function createAnchorWithVertex(from: number[], to: number[]): number {
   });
   return anchorIndex;
 }
-
-
-
-
-
-
 
 function setStructureEndpointPoint(
   endpointId: number,
@@ -1321,21 +1303,6 @@ function showViewerFullImage(src: string, alt: string): void {
   window.setTimeout(scrollViewerFullImageIntoView, 60);
 }
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 function adjustDraftEdgeLength(delta: number): void {
   if (!manualDraftLine) {
     return;
@@ -1356,18 +1323,6 @@ function adjustDraftEdgeLength(delta: number): void {
         };
   renderCropResultFromCache();
 }
-
-
-
-
-
-
-
-
-
-
-
-
 
 function formatVertexSolveCoordValue(value: number | undefined): string {
   return ManualEditorController.formatVertexSolveCoordValue(value);
@@ -1751,9 +1706,6 @@ function getAnchorLinkedLineIndexes(anchor: StructureAnchor): Set<number> {
   anchor.to.forEach((lineIndex) => indexes.add(lineIndex));
   return indexes;
 }
-
-
-
 
 function findAnchorByLinks(from: number[], to: number[]): number {
   const sortedFrom = Array.from(new Set(from)).sort((a, b) => a - b);
@@ -2140,9 +2092,6 @@ function getCurrentLinesForDisplay(): Array<ManualAnnotation | StructureLine> {
   return renderAnnotationPreviewHeld ? MCV_DATA.annotations : MCV_DATA.structure.lines;
 }
 
-
-
-
 function findClosestDisplayedLineIndex(point: ManualPoint): number {
   const lines = getCurrentLinesForDisplay();
   if (lines.length === 0) {
@@ -2383,12 +2332,6 @@ function removeLineAtIndex(lineIndex: number): void {
   markAnnotationsDirty();
   renderCropResultFromCache();
 }
-
-
-
-
-
-
 
 function getCropViewPointFromClient(
   clientX: number,
@@ -2972,36 +2915,6 @@ function configureExternalLink(node: HTMLAnchorElement, url: string, label: stri
   });
 }
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 function findVideoByYoutubeId(youtubeId: string): { id: string; item: MediaVideoEntry } | null {
   return MediaController.findVideoByYoutubeId(mediaLibrary, youtubeId);
 }
@@ -3100,18 +3013,6 @@ function setTabButtonState(): void {
   MediaController.setTabButtonState(activeMediaTab);
 }
 
-
-
-
-
-
-
-
-
-
-
-
-
 function matchesMediaSearch(id: string, item: MediaVideoEntry | MediaImageEntry, tab: MediaTab): boolean {
   return MediaController.matchesMediaSearch(mediaSearchQuery, id, item, tab, {
     normalizeSearchToken: MediaUtils.normalizeSearchToken,
@@ -3119,30 +3020,6 @@ function matchesMediaSearch(id: string, item: MediaVideoEntry | MediaImageEntry,
     normalizePossibleUrl: MediaUtils.normalizePossibleUrl,
   });
 }
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 
 function getVertexDotPoint(vertex: StructureVertexData): ManualPoint | null {
   const endpointIds = [
@@ -3169,18 +3046,6 @@ function getVertexDotPoint(vertex: StructureVertexData): ManualPoint | null {
   }
   return { x: sumX / count, y: sumY / count };
 }
-
-
-
-
-
-
-
-
-
-
-
-
 
 function applyImportedMcvState(data: {
   annotations: ManualAnnotation[];
