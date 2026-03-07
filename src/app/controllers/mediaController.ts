@@ -169,15 +169,24 @@ export function findMediaByNormalizedUrl(
     for (const [id, item] of entries) {
       const itemUrl = normalizePossibleUrl(item.url);
       if (itemUrl && itemUrl === normalizedUrl) {
+        if (tab === "videos") {
+          const videoItem = item as MediaVideoEntry;
+          return {
+            tab: "videos",
+            id,
+            kind: "video",
+            title: videoItem.name,
+            url: videoItem.url,
+            ...(videoItem.youtube_id ? { youtubeId: videoItem.youtube_id } : {}),
+          };
+        }
+        const imageItem = item as MediaImageEntry;
         return {
-          tab,
+          tab: "images",
           id,
-          kind: tab === "videos" ? "video" : "image",
-          title: item.name,
-          url: item.url,
-          ...(tab === "videos" && "youtube_id" in item && item.youtube_id
-            ? { youtubeId: item.youtube_id }
-            : {}),
+          kind: "image",
+          title: imageItem.name,
+          url: imageItem.url,
         };
       }
     }

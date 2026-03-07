@@ -113,7 +113,7 @@ function applyPythonTemplateInsertions(templateText, insertions) {
     if (!markerPattern.test(rendered)) {
       throw new Error(`Missing python template insertion marker: ${name}`);
     }
-    rendered = rendered.replace(markerPattern, `$1${name} = ${value}`);
+    rendered = rendered.replace(markerPattern, (match, indent) => `${indent}${name} = ${value}`);
   }
 
   const unresolvedMarkers = rendered.match(

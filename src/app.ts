@@ -52,6 +52,18 @@ type McvPoseSolveArgs = {
   initial_vfov_deg?: number;
 };
 
+type McvReprojectedLine = {
+  line_index: number;
+  from: {
+    x: number;
+    y: number;
+  };
+  to: {
+    x: number;
+    y: number;
+  };
+};
+
 type McvPoseSolveResult = {
   point_count: number;
   inlier_count: number;
@@ -78,6 +90,7 @@ type McvPoseSolveResult = {
     pitch: number;
   };
   tp_command: string;
+  reprojected_lines?: McvReprojectedLine[];
 };
 
 type McvLineSegment = [number, number, number, number];
@@ -148,7 +161,7 @@ type DraftManualLine = {
   flipped: boolean;
   length?: number;
 };
-type ManualInteractionMode = "draw" | "anchor" | "edit" | "vertexSolve" | "poseSolve";
+type ManualInteractionMode = "draw" | "anchor" | "edit" | "vertexSolve" | "poseSolve" | "reproject";
 type StructureVertex = {
   endpointIds: number[];
   point: ManualPoint;
@@ -1358,13 +1371,17 @@ function setManualInteractionMode(mode: ManualInteractionMode): void {
   if (manualInteractionMode === mode) {
     return;
   }
+  const isSolveMode = (value: ManualInteractionMode) =>
+    value === "vertexSolve" || value === "poseSolve" || value === "reproject";
+  const isPoseFamilyMode = (value: ManualInteractionMode) =>
+    value === "poseSolve" || value === "reproject";
   const leavingSolveMode =
-    manualInteractionMode === "vertexSolve" || manualInteractionMode === "poseSolve";
-  const enteringSolveMode = mode === "vertexSolve" || mode === "poseSolve";
+    isSolveMode(manualInteractionMode);
+  const enteringSolveMode = isSolveMode(mode);
   if (leavingSolveMode && !enteringSolveMode) {
     purgeGeneratedVerticesKeepingAnchors();
   }
-  if (manualInteractionMode === "poseSolve" && mode !== "poseSolve") {
+  if (isPoseFamilyMode(manualInteractionMode) && !isPoseFamilyMode(mode)) {
     resetPoseSolveState();
   }
   manualInteractionMode = mode;
@@ -1395,6 +1412,18 @@ function setManualInteractionMode(mode: ManualInteractionMode): void {
     vertexSolveRenderData = runVertexSolveAndBuildData();
     vertexSolveHoveredVertexIndex = null;
   } else if (mode === "poseSolve") {
+    manualDraftLine = null;
+    manualDragPointerId = null;
+    manualAnchorHoveredVertex = null;
+    manualAnchorSelectedIndex = null;
+    manualAnchorSelectedInput = "";
+    manualEditHoveredLineIndex = null;
+    manualEditSelectedLineIndex = null;
+    if (!vertexSolveRenderData) {
+      vertexSolveRenderData = runVertexSolveAndBuildData();
+    }
+    vertexSolveHoveredVertexIndex = null;
+  } else if (mode === "reproject") {
     manualDraftLine = null;
     manualDragPointerId = null;
     manualAnchorHoveredVertex = null;
@@ -2445,11 +2474,16 @@ function createManualModeCropResultSvg(
   const anchorMode = getManualInteractionMode() === "anchor";
   const editMode = getManualInteractionMode() === "edit";
   const vertexSolveMode = getManualInteractionMode() === "vertexSolve";
+  const reprojectMode = getManualInteractionMode() === "reproject";
+  const poseResult = poseSolveState?.status === "done" ? poseSolveState.result : undefined;
   const solveData = vertexSolveMode
     ? (vertexSolveRenderData ?? (vertexSolveRenderData = runVertexSolveAndBuildData()))
     : null;
   const potentialLinkIndexes = manualDraftLine ? getDraftPotentialLinkIndexes(manualDraftLine) : new Set<number>();
   const linesToRender: Array<ManualAnnotation | StructureLine> = getCurrentLinesForDisplay();
+  const reprojectedLines = reprojectMode
+    ? (poseResult?.reprojected_lines ?? [])
+    : [];
 
   const anchorLightIndexes = new Set<number>();
   if (anchorMode) {
@@ -2468,33 +2502,45 @@ function createManualModeCropResultSvg(
     }
   }
 
-  linesToRender.forEach((line, index) => {
-    const editHighlighted =
-      editMode && (manualEditHoveredLineIndex === index || manualEditSelectedLineIndex === index);
-    const axisColor =
-      vertexSolveMode
-        ? solveData && solveData.traversedLineIndexes.has(index)
-          ? "#5dff74"
-          : "#ffffff"
-        : (anchorMode && anchorLightIndexes.has(index)) || editHighlighted
-        ? SvgUtils.getAxisLightColor(line.axis)
-        : potentialLinkIndexes.has(index)
+  if (reprojectMode) {
+    reprojectedLines.forEach((line) => {
+      const sourceLine = MCV_DATA.structure.lines[line.line_index];
+      if (!sourceLine) {
+        return;
+      }
+      const axisColor = SvgUtils.getAxisColor(sourceLine.axis);
+      const segment: McvLineSegment = [line.from.x, line.from.y, line.to.x, line.to.y];
+      SvgUtils.appendSvgLine(sceneGroup, segment, axisColor, 2.2, 1);
+    });
+  } else {
+    linesToRender.forEach((line, index) => {
+      const editHighlighted =
+        editMode && (manualEditHoveredLineIndex === index || manualEditSelectedLineIndex === index);
+      const axisColor =
+        vertexSolveMode
+          ? solveData && solveData.traversedLineIndexes.has(index)
+            ? "#5dff74"
+            : "#ffffff"
+          : (anchorMode && anchorLightIndexes.has(index)) || editHighlighted
           ? SvgUtils.getAxisLightColor(line.axis)
-          : SvgUtils.getAxisColor(line.axis);
-    const segment = SvgUtils.getLineSegmentForLine(line);
-    SvgUtils.appendSvgLine(
-      sceneGroup,
-      segment,
-      axisColor,
-      2,
-      1,
-      anchorMode || vertexSolveMode ? undefined : SvgUtils.getAxisMarkerId(line.axis)
-    );
-    if (!anchorMode && !vertexSolveMode) {
-      SvgUtils.appendSvgLineLabel(sceneGroup, segment, line.length, axisColor);
-    }
-  });
-  if (!anchorMode && !vertexSolveMode && manualDraftLine) {
+          : potentialLinkIndexes.has(index)
+            ? SvgUtils.getAxisLightColor(line.axis)
+            : SvgUtils.getAxisColor(line.axis);
+      const segment = SvgUtils.getLineSegmentForLine(line);
+      SvgUtils.appendSvgLine(
+        sceneGroup,
+        segment,
+        axisColor,
+        2,
+        1,
+        anchorMode || vertexSolveMode ? undefined : SvgUtils.getAxisMarkerId(line.axis)
+      );
+      if (!anchorMode && !vertexSolveMode) {
+        SvgUtils.appendSvgLineLabel(sceneGroup, segment, line.length, axisColor);
+      }
+    });
+  }
+  if (!anchorMode && !vertexSolveMode && !reprojectMode && manualDraftLine) {
     const draftSegment = SvgUtils.getLineSegmentForDraft(manualDraftLine);
     const axisColor = SvgUtils.getAxisColor(manualDraftLine.axis);
     SvgUtils.appendSvgLine(
@@ -2626,7 +2672,7 @@ function createManualModeCropResultSvg(
       renderCropResultFromCache();
       return;
     }
-    if (vertexSolveMode) {
+    if (vertexSolveMode || reprojectMode) {
       event.preventDefault();
       return;
     }
@@ -2678,7 +2724,7 @@ function createManualModeCropResultSvg(
   });
 
   svg.addEventListener("contextmenu", (event) => {
-    if (!cropResultCache || event.ctrlKey || viewerCtrlHeld || anchorMode || vertexSolveMode) {
+    if (!cropResultCache || event.ctrlKey || viewerCtrlHeld || anchorMode || vertexSolveMode || reprojectMode) {
       return;
     }
     event.preventDefault();
@@ -2785,6 +2831,9 @@ function updateManualDraftFromPointer(pointer: PointerEvent): void {
     return;
   }
   if (getManualInteractionMode() === "poseSolve") {
+    return;
+  }
+  if (getManualInteractionMode() === "reproject") {
     return;
   }
 
@@ -3822,12 +3871,12 @@ function renderMediaList(): void {
     if (activeMediaTab === "videos") {
       const videoItem = item as MediaVideoEntry;
       if (videoItem.youtube_id) {
-      const separatorNode = document.createTextNode(" | YouTube: ");
-      const youtubeLinkNode = document.createElement("a");
-      const youtubeUrl = `https://www.youtube.com/watch?v=${encodeURIComponent(videoItem.youtube_id)}`;
-      configureExternalLink(youtubeLinkNode, youtubeUrl, videoItem.youtube_id);
-      metaNode.appendChild(separatorNode);
-      metaNode.appendChild(youtubeLinkNode);
+        const separatorNode = document.createTextNode(" | YouTube: ");
+        const youtubeLinkNode = document.createElement("a");
+        const youtubeUrl = `https://www.youtube.com/watch?v=${encodeURIComponent(videoItem.youtube_id)}`;
+        configureExternalLink(youtubeLinkNode, youtubeUrl, videoItem.youtube_id);
+        metaNode.appendChild(separatorNode);
+        metaNode.appendChild(youtubeLinkNode);
       }
     }
 
@@ -3975,6 +4024,24 @@ function handleViewerKeybind(event: KeyboardEvent): void {
         void runPoseSolveFromCurrentStructure();
         return;
       }
+      if (getManualInteractionMode() === "reproject") {
+        event.preventDefault();
+        setManualInteractionMode("poseSolve");
+        void runPoseSolveFromCurrentStructure();
+        return;
+      }
+    }
+    if (event.key === "r" || event.key === "R") {
+      if (getManualInteractionMode() === "poseSolve" && poseSolveState?.status === "done") {
+        event.preventDefault();
+        setManualInteractionMode("reproject");
+        return;
+      }
+      if (getManualInteractionMode() === "reproject") {
+        event.preventDefault();
+        setManualInteractionMode("poseSolve");
+        return;
+      }
     }
     if (
       (event.key === "4" || event.code === "Numpad4") &&
@@ -3994,6 +4061,8 @@ function handleViewerKeybind(event: KeyboardEvent): void {
       } else if (getManualInteractionMode() === "vertexSolve") {
         // keep solve view active until explicit mode change
       } else if (getManualInteractionMode() === "poseSolve") {
+        // keep solve view active until explicit mode change
+      } else if (getManualInteractionMode() === "reproject") {
         // keep solve view active until explicit mode change
       } else if (manualDraftLine) {
         manualDraftLine = null;
@@ -4028,7 +4097,8 @@ function handleViewerKeybind(event: KeyboardEvent): void {
         getManualInteractionMode() === "anchor" ||
         getManualInteractionMode() === "edit" ||
         getManualInteractionMode() === "vertexSolve" ||
-        getManualInteractionMode() === "poseSolve"
+        getManualInteractionMode() === "poseSolve" ||
+        getManualInteractionMode() === "reproject"
       ) {
         return;
       }
@@ -4050,7 +4120,8 @@ function handleViewerKeybind(event: KeyboardEvent): void {
         getManualInteractionMode() === "anchor" ||
         getManualInteractionMode() === "edit" ||
         getManualInteractionMode() === "vertexSolve" ||
-        getManualInteractionMode() === "poseSolve"
+        getManualInteractionMode() === "poseSolve" ||
+        getManualInteractionMode() === "reproject"
       ) {
         return;
       }
@@ -4067,7 +4138,8 @@ function handleViewerKeybind(event: KeyboardEvent): void {
       if (
         getManualInteractionMode() === "anchor" ||
         getManualInteractionMode() === "vertexSolve" ||
-        getManualInteractionMode() === "poseSolve"
+        getManualInteractionMode() === "poseSolve" ||
+        getManualInteractionMode() === "reproject"
       ) {
         return;
       }
@@ -4083,7 +4155,8 @@ function handleViewerKeybind(event: KeyboardEvent): void {
       if (
         getManualInteractionMode() === "anchor" ||
         getManualInteractionMode() === "vertexSolve" ||
-        getManualInteractionMode() === "poseSolve"
+        getManualInteractionMode() === "poseSolve" ||
+        getManualInteractionMode() === "reproject"
       ) {
         return;
       }
@@ -4114,6 +4187,12 @@ function handleViewerKeybind(event: KeyboardEvent): void {
         return;
       }
       if (getManualInteractionMode() === "poseSolve") {
+        setManualInteractionMode("draw");
+        manualAxisSelection = axis;
+        manualAxisStartsBackwards = startsBackwards;
+        return;
+      }
+      if (getManualInteractionMode() === "reproject") {
         setManualInteractionMode("draw");
         manualAxisSelection = axis;
         manualAxisStartsBackwards = startsBackwards;

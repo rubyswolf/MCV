@@ -120,11 +120,23 @@ type McvPoseSolveResult = {
     pitch: number;
   };
   tp_command: string;
+  reprojected_lines?: Array<{
+    line_index: number;
+    from: { x: number; y: number };
+    to: { x: number; y: number };
+  }>;
 };
 
 type PoseCorrespondence = {
   image: [number, number];
   world: [number, number, number];
+};
+
+type EndpointWorldAccumulator = {
+  x: number;
+  y: number;
+  z: number;
+  count: number;
 };
 
 type McvClientConfig = {
@@ -337,6 +349,159 @@ export function buildPoseCorrespondencesFromStructure(
     });
   }
   return correspondences;
+}
+
+function buildEndpointWorldMap(
+  lines: StructureLine[],
+  vertices: StructureVertexData[]
+): Map<number, [number, number, number]> {
+  const accum = new Map<number, EndpointWorldAccumulator>();
+  const maxLineIndex = lines.length - 1;
+  for (const vertex of vertices) {
+    if (!isFiniteNumber(vertex.x) || !isFiniteNumber(vertex.y) || !isFiniteNumber(vertex.z)) {
+      continue;
+    }
+    const addSample = (endpointId: number) => {
+      const prev = accum.get(endpointId);
+      if (prev) {
+        prev.x += vertex.x!;
+        prev.y += vertex.y!;
+        prev.z += vertex.z!;
+        prev.count += 1;
+      } else {
+        accum.set(endpointId, {
+          x: vertex.x!,
+          y: vertex.y!,
+          z: vertex.z!,
+          count: 1,
+        });
+      }
+    };
+    for (const lineIndex of vertex.from) {
+      if (Number.isInteger(lineIndex) && lineIndex >= 0 && lineIndex <= maxLineIndex) {
+        addSample(lineIndex * 2);
+      }
+    }
+    for (const lineIndex of vertex.to) {
+      if (Number.isInteger(lineIndex) && lineIndex >= 0 && lineIndex <= maxLineIndex) {
+        addSample(lineIndex * 2 + 1);
+      }
+    }
+  }
+
+  const out = new Map<number, [number, number, number]>();
+  for (const [endpointId, sample] of accum.entries()) {
+    if (sample.count <= 0) {
+      continue;
+    }
+    out.set(endpointId, [sample.x / sample.count, sample.y / sample.count, sample.z / sample.count]);
+  }
+  return out;
+}
+
+function buildReprojectedLinesWeb(
+  cv: any,
+  lines: StructureLine[],
+  vertices: StructureVertexData[],
+  rvec: [number, number, number],
+  tvec: [number, number, number],
+  focal: number,
+  width: number,
+  height: number
+): Array<{
+  line_index: number;
+  from: { x: number; y: number };
+  to: { x: number; y: number };
+}> {
+  const endpointWorld = buildEndpointWorldMap(lines, vertices);
+  let camera: any = null;
+  let dist: any = null;
+  let rvecMat: any = null;
+  let tvecMat: any = null;
+  try {
+    camera = cameraMatrixFromFocalWeb(cv, focal, width, height);
+    dist = cv.Mat.zeros(4, 1, cv.CV_64FC1);
+    rvecMat = cv.matFromArray(3, 1, cv.CV_64FC1, [rvec[0], rvec[1], rvec[2]]);
+    tvecMat = cv.matFromArray(3, 1, cv.CV_64FC1, [tvec[0], tvec[1], tvec[2]]);
+    const out: Array<{
+      line_index: number;
+      from: { x: number; y: number };
+      to: { x: number; y: number };
+    }> = [];
+    for (let lineIndex = 0; lineIndex < lines.length; lineIndex += 1) {
+      const worldA = endpointWorld.get(lineIndex * 2);
+      const worldB = endpointWorld.get(lineIndex * 2 + 1);
+      if (!worldA || !worldB) {
+        continue;
+      }
+      const dx = worldB[0] - worldA[0];
+      const dy = worldB[1] - worldA[1];
+      const dz = worldB[2] - worldA[2];
+      if (Math.hypot(dx, dy, dz) < 1e-9) {
+        continue;
+      }
+      let objLine: any = null;
+      let projLine: any = null;
+      try {
+        objLine = cv.matFromArray(2, 1, cv.CV_64FC3, [
+          worldA[0],
+          worldA[1],
+          worldA[2],
+          worldB[0],
+          worldB[1],
+          worldB[2],
+        ]);
+        projLine = new cv.Mat();
+        cv.projectPoints(objLine, rvecMat, tvecMat, camera, dist, projLine);
+        const data64 = projLine.data64F as Float64Array | undefined;
+        const data32 = projLine.data32F as Float32Array | undefined;
+        let ax = Number.NaN;
+        let ay = Number.NaN;
+        let bx = Number.NaN;
+        let by = Number.NaN;
+        if (data64 && data64.length >= 4) {
+          ax = Number(data64[0]);
+          ay = Number(data64[1]);
+          bx = Number(data64[2]);
+          by = Number(data64[3]);
+        } else if (data32 && data32.length >= 4) {
+          ax = Number(data32[0]);
+          ay = Number(data32[1]);
+          bx = Number(data32[2]);
+          by = Number(data32[3]);
+        }
+        if (![ax, ay, bx, by].every((value) => Number.isFinite(value))) {
+          continue;
+        }
+        out.push({
+          line_index: lineIndex,
+          from: { x: ax, y: ay },
+          to: { x: bx, y: by },
+        });
+      } finally {
+        if (projLine && typeof projLine.delete === "function") {
+          projLine.delete();
+        }
+        if (objLine && typeof objLine.delete === "function") {
+          objLine.delete();
+        }
+      }
+    }
+    return out;
+  } finally {
+    if (tvecMat && typeof tvecMat.delete === "function") {
+      tvecMat.delete();
+    }
+    if (rvecMat && typeof rvecMat.delete === "function") {
+      rvecMat.delete();
+    }
+    if (dist && typeof dist.delete === "function") {
+      dist.delete();
+    }
+    if (camera && typeof camera.delete === "function") {
+      camera.delete();
+    }
+  }
 }
 
 function cameraMatrixFromFocalWeb(cv: any, focal: number, width: number, height: number): any {
@@ -732,6 +897,16 @@ async function runWebPoseSolve(
   const hfovDeg = (2 * Math.atan((width * 0.5) / bestFocal) * 180) / Math.PI;
   const vfovDeg = (2 * Math.atan((height * 0.5) / bestFocal) * 180) / Math.PI;
   const worldPose = poseToCameraWorldAndMinecraftAnglesWeb(cv, bestPose.rvec, bestPose.tvec);
+  const reprojectedLines = buildReprojectedLinesWeb(
+    cv,
+    lines,
+    vertices,
+    bestPose.rvec,
+    bestPose.tvec,
+    bestFocal,
+    width,
+    height
+  );
   const playerY = worldPose.camera[1] - 1.62;
   const tpCommand = `/tp @s ${worldPose.camera[0].toFixed(6)} ${playerY.toFixed(6)} ${worldPose.camera[2].toFixed(6)} ${worldPose.yaw.toFixed(6)} ${worldPose.pitch.toFixed(6)}`;
 
@@ -761,6 +936,7 @@ async function runWebPoseSolve(
       pitch: worldPose.pitch,
     },
     tp_command: tpCommand,
+    reprojected_lines: reprojectedLines,
   };
 }
 

@@ -212,6 +212,7 @@ def _extract_pose_correspondences(lines, vertices):
             continue
         line_correspondences.append(
             {
+                "line_index": int(line_index),
                 "obj_a": world_a.reshape(3),
                 "obj_b": world_b.reshape(3),
                 "img_a": obs_a,
@@ -219,6 +220,31 @@ def _extract_pose_correspondences(lines, vertices):
             }
         )
     return image_pts, object_pts, line_correspondences
+
+
+def _project_reprojected_lines(line_corr, rvec, tvec, k, dist):
+    out = []
+    for line in line_corr:
+        line_index = line.get("line_index")
+        if not isinstance(line_index, int):
+            continue
+        obj_line = np.array([line["obj_a"], line["obj_b"]], dtype=np.float64).reshape(-1, 1, 3)
+        proj_line, _ = cv2.projectPoints(obj_line, rvec, tvec, k, dist)
+        proj_line = proj_line.reshape(-1, 2)
+        out.append(
+            {
+                "line_index": int(line_index),
+                "from": {
+                    "x": float(proj_line[0][0]),
+                    "y": float(proj_line[0][1]),
+                },
+                "to": {
+                    "x": float(proj_line[1][0]),
+                    "y": float(proj_line[1][1]),
+                },
+            }
+        )
+    return out
 
 
 def _camera_matrix_from_focal(focal, width, height):
@@ -483,6 +509,10 @@ def run_pose_solve(args):
     if not np.isfinite(best_cost):
         raise RuntimeError("Focal search failed to find a valid PnP solution")
 
+    k_best = _camera_matrix_from_focal(best_f, width, height)
+    dist_best = np.zeros((4, 1), dtype=np.float64)
+    reprojected_lines = _project_reprojected_lines(line_corr, best_rvec, best_tvec, k_best, dist_best)
+
     cam_world, pitch_deg, yaw_deg = _pose_to_camera_world_and_minecraft_angles(best_rvec, best_tvec)
     player_y = float(cam_world[1] - 1.62)
     hfov_deg = float(np.degrees(2.0 * np.arctan((width * 0.5) / best_f)))
@@ -520,6 +550,7 @@ def run_pose_solve(args):
             "pitch": float(pitch_deg),
         },
         "tp_command": tp_command,
+        "reprojected_lines": reprojected_lines,
     }
 
 
