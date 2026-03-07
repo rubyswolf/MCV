@@ -3775,28 +3775,42 @@ function renderMediaList(): void {
     titleNode.textContent = item.name;
     titleNode.addEventListener("click", () => {
       clearMediaError();
+      if (activeMediaTab === "videos") {
+        const videoItem = item as MediaVideoEntry;
+        openViewer({
+          tab: "videos",
+          id,
+          kind: "video",
+          title: videoItem.name,
+          url: videoItem.url,
+          ...(videoItem.youtube_id ? { youtubeId: videoItem.youtube_id } : {}),
+        });
+        return;
+      }
+
+      const imageItem = item as MediaImageEntry;
       openViewer({
-        tab: activeMediaTab,
+        tab: "images",
         id,
-        kind: activeMediaTab === "videos" ? "video" : "image",
-        title: item.name,
-        url: item.url,
-        ...(activeMediaTab === "videos" && "youtube_id" in item && item.youtube_id
-          ? { youtubeId: item.youtube_id }
-          : {}),
+        kind: "image",
+        title: imageItem.name,
+        url: imageItem.url,
       });
     });
 
     const metaNode = document.createElement("div");
     metaNode.className = "media-meta";
     metaNode.textContent = id;
-    if (activeMediaTab === "videos" && "youtube_id" in item && item.youtube_id) {
+    if (activeMediaTab === "videos") {
+      const videoItem = item as MediaVideoEntry;
+      if (videoItem.youtube_id) {
       const separatorNode = document.createTextNode(" | YouTube: ");
       const youtubeLinkNode = document.createElement("a");
-      const youtubeUrl = `https://www.youtube.com/watch?v=${encodeURIComponent(item.youtube_id)}`;
-      configureExternalLink(youtubeLinkNode, youtubeUrl, item.youtube_id);
+      const youtubeUrl = `https://www.youtube.com/watch?v=${encodeURIComponent(videoItem.youtube_id)}`;
+      configureExternalLink(youtubeLinkNode, youtubeUrl, videoItem.youtube_id);
       metaNode.appendChild(separatorNode);
       metaNode.appendChild(youtubeLinkNode);
+      }
     }
 
     const urlNode = document.createElement("a");
