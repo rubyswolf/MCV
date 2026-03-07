@@ -1,6 +1,9 @@
 import * as Geometry from "./app/geometry";
 import * as MediaUtils from "./app/mediaUtils";
 import * as SvgUtils from "./app/svgUtils";
+import * as ManualEditorController from "./app/controllers/manualEditorController";
+import * as MediaController from "./app/controllers/mediaController";
+import * as ViewerController from "./app/controllers/viewerController";
 import {
   buildPoseCorrespondencesFromStructure as buildPoseCorrespondencesFromStructureImpl,
   createMcvClient,
@@ -360,7 +363,7 @@ let mediaLibrary: MediaLibrary = {
 const NO_YOUTUBE_VIDEO_ERROR =
   "video is not provided by the Media API, please download the video yourself and upload it.";
 const NO_MEDIA_ID_ERROR = "media ID is not provided by the Media API.";
-const VIEWER_FPS_FALLBACK = 30;
+const VIEWER_FPS_FALLBACK = ViewerController.VIEWER_FPS_FALLBACK;
 // const movement = {speed: 1.0,friction: 1.0,grip: 1.0,stop: 1.0,slip: 0.0,buildup: 0,zoomSpeed: 0.001} //sharp
 // const movement = {speed: 1.0,friction: 0.05,grip: 1.0,stop: 1.0,slip: 0.0,buildup: 0,zoomSpeed: 0.001} //smooth
 const movement = {
@@ -375,20 +378,15 @@ const movement = {
 // const movement = {speed: 1.0,friction: 0.05,grip: 0.2,stop: 0.0,slip: 1.0,buildup: 0.5,zoomSpeed: 0.001} //gliding
 
 function getViewerFrameRate(): number {
-  if (typeof viewerDetectedFps === "number" && Number.isFinite(viewerDetectedFps) && viewerDetectedFps > 0) {
-    return viewerDetectedFps;
-  }
-  return VIEWER_FPS_FALLBACK;
+  return ViewerController.getViewerFrameRate(viewerDetectedFps, VIEWER_FPS_FALLBACK);
 }
 
 function getViewerFrameDurationSeconds(): number {
-  const fps = getViewerFrameRate();
-  return fps > 0 ? 1 / fps : 1 / VIEWER_FPS_FALLBACK;
+  return ViewerController.getViewerFrameDurationSeconds(viewerDetectedFps, VIEWER_FPS_FALLBACK);
 }
 
 function getViewerFrameBase(): number {
-  const base = Math.round(getViewerFrameRate());
-  return Math.max(1, Number.isFinite(base) ? base : VIEWER_FPS_FALLBACK);
+  return ViewerController.getViewerFrameBase(viewerDetectedFps, VIEWER_FPS_FALLBACK);
 }
 
 function stopViewerFrameRateProbe(): void {
@@ -401,80 +399,10 @@ function stopViewerFrameRateProbe(): void {
 
 function startViewerFrameRateProbe(video: HTMLVideoElement): void {
   stopViewerFrameRateProbe();
-  const callbackFn = (video as HTMLVideoElement & {
-    requestVideoFrameCallback?: (
-      callback: (now: number, metadata: { mediaTime?: number; presentedFrames?: number }) => void
-    ) => number;
-    cancelVideoFrameCallback?: (handle: number) => void;
-  }).requestVideoFrameCallback;
-  if (typeof callbackFn !== "function") {
-    return;
-  }
-  const cancelFn = (video as HTMLVideoElement & {
-    cancelVideoFrameCallback?: (handle: number) => void;
-  }).cancelVideoFrameCallback;
-  let canceled = false;
-  let handle: number | null = null;
-  let lastMediaTime: number | null = null;
-  let lastPresentedFrames: number | null = null;
-  const samples: number[] = [];
-  const maxSamples = 48;
-
-  const computeMedian = (values: number[]): number => {
-    const sorted = [...values].sort((a, b) => a - b);
-    const middle = Math.floor(sorted.length / 2);
-    if (sorted.length % 2 === 0) {
-      return (sorted[middle - 1] + sorted[middle]) * 0.5;
-    }
-    return sorted[middle];
-  };
-
-  const schedule = () => {
-    if (canceled) {
-      return;
-    }
-    handle = callbackFn.call(video, (_now, metadata) => {
-      if (canceled) {
-        return;
-      }
-      const mediaTime = typeof metadata.mediaTime === "number" ? metadata.mediaTime : null;
-      const presentedFrames =
-        typeof metadata.presentedFrames === "number" ? metadata.presentedFrames : null;
-      if (mediaTime !== null) {
-        if (lastMediaTime !== null && mediaTime > lastMediaTime) {
-          let frameDelta = 1;
-          if (
-            presentedFrames !== null &&
-            lastPresentedFrames !== null &&
-            presentedFrames > lastPresentedFrames
-          ) {
-            frameDelta = presentedFrames - lastPresentedFrames;
-          }
-          const fpsSample = frameDelta / (mediaTime - lastMediaTime);
-          if (Number.isFinite(fpsSample) && fpsSample > 1 && fpsSample < 240) {
-            samples.push(fpsSample);
-            if (samples.length > maxSamples) {
-              samples.shift();
-            }
-            viewerDetectedFps = computeMedian(samples);
-          }
-        }
-        lastMediaTime = mediaTime;
-      }
-      if (presentedFrames !== null) {
-        lastPresentedFrames = presentedFrames;
-      }
-      schedule();
-    });
-  };
-
-  schedule();
-  stopViewerFpsProbe = () => {
-    canceled = true;
-    if (handle !== null && typeof cancelFn === "function") {
-      cancelFn.call(video, handle);
-    }
-  };
+  const stopFn = ViewerController.startViewerFrameRateProbe(video, (fps) => {
+    viewerDetectedFps = fps;
+  });
+  stopViewerFpsProbe = stopFn || null;
 }
 
 
@@ -1442,17 +1370,11 @@ function adjustDraftEdgeLength(delta: number): void {
 
 
 function formatVertexSolveCoordValue(value: number | undefined): string {
-  if (value === undefined) {
-    return "?";
-  }
-  if (Number.isInteger(value)) {
-    return String(value);
-  }
-  return value.toFixed(3).replace(/\.?0+$/, "");
+  return ManualEditorController.formatVertexSolveCoordValue(value);
 }
 
 function formatVertexSolveCoordTuple(coord: VertexSolveCoord): string {
-  return `(${formatVertexSolveCoordValue(coord.x)}, ${formatVertexSolveCoordValue(coord.y)}, ${formatVertexSolveCoordValue(coord.z)})`;
+  return ManualEditorController.formatVertexSolveCoordTuple(coord);
 }
 
 function getManualInteractionMode(): ManualInteractionMode {
@@ -1524,41 +1446,7 @@ function setManualInteractionMode(mode: ManualInteractionMode): void {
 }
 
 function buildPoseSolveArgsFromCurrentStructure(): McvPoseSolveArgs | null {
-  if (!cropResultCache) {
-    return null;
-  }
-  return {
-    width: cropResultCache.width,
-    height: cropResultCache.height,
-    lines: MCV_DATA.structure.lines.map((line) => ({
-      from: {
-        x: line.from.x,
-        y: line.from.y,
-        from: [...line.from.from],
-        to: [...line.from.to],
-        ...(line.from.anchor !== undefined ? { anchor: line.from.anchor } : {}),
-        ...(line.from.vertex !== undefined ? { vertex: line.from.vertex } : {}),
-      },
-      to: {
-        x: line.to.x,
-        y: line.to.y,
-        from: [...line.to.from],
-        to: [...line.to.to],
-        ...(line.to.anchor !== undefined ? { anchor: line.to.anchor } : {}),
-        ...(line.to.vertex !== undefined ? { vertex: line.to.vertex } : {}),
-      },
-      axis: line.axis,
-      ...(line.length !== undefined ? { length: line.length } : {}),
-    })),
-    vertices: MCV_DATA.structure.vertices.map((vertex) => ({
-      from: [...vertex.from],
-      to: [...vertex.to],
-      ...(vertex.anchor !== undefined ? { anchor: vertex.anchor } : {}),
-      ...(vertex.x !== undefined ? { x: vertex.x } : {}),
-      ...(vertex.y !== undefined ? { y: vertex.y } : {}),
-      ...(vertex.z !== undefined ? { z: vertex.z } : {}),
-    })),
-  };
+  return ManualEditorController.buildPoseSolveArgsFromCurrentStructure(cropResultCache, MCV_DATA.structure);
 }
 
 async function runPoseSolveFromCurrentStructure(): Promise<void> {
@@ -1609,21 +1497,11 @@ async function runPoseSolveFromCurrentStructure(): Promise<void> {
 }
 
 function buildAnchorInputFromAnchor(anchor: StructureAnchor): string {
-  const values: number[] = [];
-  if (anchor.x !== undefined) {
-    values.push(anchor.x);
-  }
-  if (anchor.y !== undefined) {
-    values.push(anchor.y);
-  }
-  if (anchor.z !== undefined) {
-    values.push(anchor.z);
-  }
-  return values.map((value) => String(value)).join(", ");
+  return ManualEditorController.buildAnchorInputFromAnchor(anchor);
 }
 
 function buildAnchorLabelFromInput(input: string): string {
-  return `(${input})`;
+  return ManualEditorController.buildAnchorLabelFromInput(input);
 }
 
 function getAnchorLabel(anchor: StructureAnchor, index: number): string {
@@ -3125,218 +3003,44 @@ function configureExternalLink(node: HTMLAnchorElement, url: string, label: stri
 
 
 function findVideoByYoutubeId(youtubeId: string): { id: string; item: MediaVideoEntry } | null {
-  for (const [id, item] of Object.entries(mediaLibrary.videos)) {
-    if (id === youtubeId || item.youtube_id === youtubeId) {
-      return { id, item };
-    }
-  }
-  return null;
+  return MediaController.findVideoByYoutubeId(mediaLibrary, youtubeId);
 }
 
 function findMediaById(id: string): ViewerMedia | null {
-  if (mediaLibrary.videos[id]) {
-    const video = mediaLibrary.videos[id];
-    return {
-      tab: "videos",
-      id,
-      kind: "video",
-      title: video.name,
-      url: video.url,
-      youtubeId: video.youtube_id,
-    };
-  }
-  if (mediaLibrary.images[id]) {
-    const image = mediaLibrary.images[id];
-    return {
-      tab: "images",
-      id,
-      kind: "image",
-      title: image.name,
-      url: image.url,
-    };
-  }
-  return null;
+  return MediaController.findMediaById(mediaLibrary, id);
 }
 
 function splitSecondsAndFrames(secondsValue: number): { seconds: number; frames: number } {
-  const safe = Math.max(0, Number.isFinite(secondsValue) ? secondsValue : 0);
-  const seconds = Math.floor(safe);
-  const fractional = safe - seconds;
-  const frameBase = getViewerFrameBase();
-  const frames = Math.max(0, Math.min(frameBase - 1, Math.floor(fractional * frameBase + 1e-6)));
-  return { seconds, frames };
+  return MediaController.splitSecondsAndFrames(secondsValue, getViewerFrameBase());
 }
 
 function buildMcvSourceFromViewer(viewer: ViewerMedia): McvDataSource | null {
-  if (viewer.id === "raw-url" || viewer.id === "upload-file") {
-    return null;
-  }
-  if (viewer.tab === "videos") {
-    const videoEntry = mediaLibrary.videos[viewer.id];
-    if (!videoEntry) {
-      return null;
-    }
-    const source: McvDataSource = {
-      type: "video",
-      id: viewer.id,
-      name: videoEntry.name,
-      url: videoEntry.url,
-      ...(videoEntry.youtube_id ? { youtube_id: videoEntry.youtube_id } : {}),
-    };
-    if (viewer.initialSeekSeconds !== undefined) {
-      const { seconds, frames } = splitSecondsAndFrames(viewer.initialSeekSeconds);
-      source.seconds = seconds;
-      source.frames = frames;
-    }
-    return source;
-  }
-  if (viewer.tab === "images") {
-    const imageEntry = mediaLibrary.images[viewer.id];
-    if (!imageEntry) {
-      return null;
-    }
-    return {
-      type: "image",
-      id: viewer.id,
-      name: imageEntry.name,
-      url: imageEntry.url,
-    };
-  }
-  return null;
+  return MediaController.buildMcvSourceFromViewer(mediaLibrary, viewer, getViewerFrameBase());
 }
 
 function resolveVideoViewerFromSource(source: McvDataSource): ViewerMedia | null {
-  if (source.type !== "video") {
-    return null;
-  }
-  if (!("id" in source) || !("url" in source)) {
-    return null;
-  }
-  const byId = findMediaById(source.id);
-  if (byId && byId.kind === "video") {
-    return byId;
-  }
-  if (source.youtube_id) {
-    const byYoutube = findVideoByYoutubeId(source.youtube_id);
-    if (byYoutube) {
-      return {
-        tab: "videos",
-        id: byYoutube.id,
-        kind: "video",
-        title: byYoutube.item.name,
-        url: byYoutube.item.url,
-        ...(byYoutube.item.youtube_id ? { youtubeId: byYoutube.item.youtube_id } : {}),
-      };
-    }
-  }
-  const normalizedSourceUrl = MediaUtils.normalizePossibleUrl(source.url);
-  if (normalizedSourceUrl) {
-    const byUrl = findMediaByNormalizedUrl(normalizedSourceUrl);
-    if (byUrl && byUrl.kind === "video") {
-      return byUrl;
-    }
-  }
-  return null;
+  return MediaController.resolveVideoViewerFromSource(
+    mediaLibrary,
+    activeMediaTab,
+    source,
+    MediaUtils.normalizePossibleUrl
+  );
 }
 
 function parseLaunchSelectionIntent(): LaunchSelectionIntent | null {
-  const candidates: string[] = [];
-
-  const pushCandidate = (value: string | null | undefined) => {
-    if (!value) {
-      return;
-    }
-    const trimmed = value.trim();
-    if (!trimmed) {
-      return;
-    }
-    candidates.push(trimmed);
-  };
-
-  pushCandidate(window.location.search);
-  pushCandidate(window.location.hash.startsWith("#") ? window.location.hash.slice(1) : window.location.hash);
-
-  try {
-    if (window.parent && window.parent !== window) {
-      pushCandidate(window.parent.location.search);
-      pushCandidate(
-        window.parent.location.hash.startsWith("#")
-          ? window.parent.location.hash.slice(1)
-          : window.parent.location.hash
-      );
-    }
-  } catch {
-    // Cross-origin parent access can fail; ignore and continue with local params.
-  }
-
-  try {
-    if (window.top && window.top !== window && window.top !== window.parent) {
-      pushCandidate(window.top.location.search);
-      pushCandidate(
-        window.top.location.hash.startsWith("#")
-          ? window.top.location.hash.slice(1)
-          : window.top.location.hash
-      );
-    }
-  } catch {
-    // Cross-origin top access can fail; ignore and continue with available params.
-  }
-
-  for (const candidate of candidates) {
-    const normalized = candidate.startsWith("?")
-      ? candidate.slice(1)
-      : candidate.startsWith("#")
-        ? candidate.slice(1)
-        : candidate;
-    const queryPart = normalized.includes("?")
-      ? normalized.slice(normalized.indexOf("?") + 1)
-      : normalized;
-    const params = new URLSearchParams(queryPart);
-    const idValue = (params.get("id") || "").trim();
-    const ytValue = (params.get("yt") || "").trim();
-    const tRaw = (params.get("t") || "").trim();
-    const fRaw = (params.get("f") || "").trim();
-
-    if (idValue) {
-      return { mode: "id", value: idValue, tRaw, fRaw };
-    }
-    if (ytValue) {
-      return { mode: "yt", value: ytValue, tRaw, fRaw };
-    }
-  }
-
-  return null;
+  return MediaController.parseLaunchSelectionIntent();
 }
 
 function buildLaunchSeekInfo(intent: LaunchSelectionIntent): {
   initialSeekSeconds?: number;
   timestampLabel?: string;
 } {
-  const hasT = intent.tRaw.length > 0;
-  const hasF = intent.fRaw.length > 0;
-  if (!hasT && !hasF) {
-    return {};
-  }
-
-  const parsedT = hasT ? MediaUtils.parseTimestampSeconds(intent.tRaw) : 0;
-  if (parsedT === null) {
-    return {};
-  }
-
-  let frame = 0;
-  if (hasF) {
-    if (!/^\d+$/.test(intent.fRaw)) {
-      return { initialSeekSeconds: Math.max(0, parsedT), timestampLabel: `${intent.tRaw || "0"}|0` };
-    }
-    frame = Math.max(0, Number(intent.fRaw));
-  }
-
-  const frameBase = getViewerFrameBase();
-  const initialSeekSeconds = Math.max(0, parsedT) + frame / frameBase;
-  const displayFrame = frame % frameBase;
-  const displaySeconds = Math.max(0, Math.floor(parsedT + Math.floor(frame / frameBase)));
-  const timestampLabel = `${MediaUtils.formatTimestamp(displaySeconds)}|${displayFrame}`;
-  return { initialSeekSeconds, timestampLabel };
+  return MediaController.buildLaunchSeekInfo(
+    intent,
+    getViewerFrameBase(),
+    MediaUtils.parseTimestampSeconds,
+    MediaUtils.formatTimestamp
+  );
 }
 
 function applyLaunchSelectionIfAny(): void {
@@ -3384,47 +3088,16 @@ function applyLaunchSelectionIfAny(): void {
 }
 
 function findMediaByNormalizedUrl(normalizedUrl: string): ViewerMedia | null {
-  const tabOrder: MediaTab[] =
-    activeMediaTab === "videos" ? ["videos", "images"] : ["images", "videos"];
-
-  for (const tab of tabOrder) {
-    const entries =
-      tab === "videos"
-        ? Object.entries(mediaLibrary.videos)
-        : Object.entries(mediaLibrary.images);
-    for (const [id, item] of entries) {
-      const itemUrl = MediaUtils.normalizePossibleUrl(item.url);
-      if (itemUrl && itemUrl === normalizedUrl) {
-        return {
-          tab,
-          id,
-          kind: tab === "videos" ? "video" : "image",
-          title: item.name,
-          url: item.url,
-          ...(tab === "videos" && "youtube_id" in item && item.youtube_id
-            ? { youtubeId: item.youtube_id }
-            : {}),
-        };
-      }
-    }
-  }
-
-  return null;
+  return MediaController.findMediaByNormalizedUrl(
+    mediaLibrary,
+    activeMediaTab,
+    normalizedUrl,
+    MediaUtils.normalizePossibleUrl
+  );
 }
 
 function setTabButtonState(): void {
-  const videosButton = document.getElementById("tab-videos") as HTMLButtonElement | null;
-  const imagesButton = document.getElementById("tab-images") as HTMLButtonElement | null;
-  const uploadButton = document.getElementById("tab-upload") as HTMLButtonElement | null;
-  if (!videosButton || !imagesButton || !uploadButton) {
-    return;
-  }
-  const isVideos = activeMediaTab === "videos";
-  const isImages = activeMediaTab === "images";
-  const isUpload = activeMediaTab === "upload";
-  videosButton.classList.toggle("active", isVideos);
-  imagesButton.classList.toggle("active", isImages);
-  uploadButton.classList.toggle("active", isUpload);
+  MediaController.setTabButtonState(activeMediaTab);
 }
 
 
@@ -3440,38 +3113,11 @@ function setTabButtonState(): void {
 
 
 function matchesMediaSearch(id: string, item: MediaVideoEntry | MediaImageEntry, tab: MediaTab): boolean {
-  const query = MediaUtils.normalizeSearchToken(mediaSearchQuery);
-  if (!query) {
-    return true;
-  }
-
-  const intent = MediaUtils.parseSearchIntent(mediaSearchQuery);
-
-  if (intent.youtubeId && tab === "videos") {
-    const videoItem = item as MediaVideoEntry;
-    if (id === intent.youtubeId || videoItem.youtube_id === intent.youtubeId) {
-      return true;
-    }
-  }
-
-  if (intent.normalizedUrl) {
-    const itemNormalizedUrl = MediaUtils.normalizePossibleUrl(item.url);
-    if (itemNormalizedUrl && itemNormalizedUrl === intent.normalizedUrl) {
-      return true;
-    }
-    if (MediaUtils.normalizeSearchToken(item.url).includes(query) || query.includes(MediaUtils.normalizeSearchToken(item.url))) {
-      return true;
-    }
-  }
-
-  const haystack = [id, item.name, item.url];
-  if (tab === "videos") {
-    const videoItem = item as MediaVideoEntry;
-    if (videoItem.youtube_id) {
-      haystack.push(videoItem.youtube_id);
-    }
-  }
-  return haystack.some((value) => MediaUtils.normalizeSearchToken(value).includes(query));
+  return MediaController.matchesMediaSearch(mediaSearchQuery, id, item, tab, {
+    normalizeSearchToken: MediaUtils.normalizeSearchToken,
+    parseSearchIntent: MediaUtils.parseSearchIntent,
+    normalizePossibleUrl: MediaUtils.normalizePossibleUrl,
+  });
 }
 
 
@@ -3758,13 +3404,7 @@ async function handleUploadedFile(file: File): Promise<void> {
 }
 
 function clampVideoTime(video: HTMLVideoElement, seconds: number): number {
-  if (!Number.isFinite(seconds) || seconds < 0) {
-    return 0;
-  }
-  if (Number.isFinite(video.duration) && video.duration > 0) {
-    return Math.min(seconds, video.duration);
-  }
-  return seconds;
+  return ViewerController.clampVideoTime(video, seconds);
 }
 
 function syncViewerTimeInputs(force = false): void {
@@ -3784,27 +3424,7 @@ function syncViewerTimeInputs(force = false): void {
 }
 
 function parseFrameSuffix(raw: string): { base: string; frame: number } | null {
-  const trimmed = raw.trim();
-  if (!trimmed) {
-    return null;
-  }
-  const pipeIndex = trimmed.lastIndexOf("|");
-  if (pipeIndex < 0) {
-    return { base: trimmed, frame: 0 };
-  }
-  const base = trimmed.slice(0, pipeIndex).trim();
-  const frameRaw = trimmed.slice(pipeIndex + 1).trim();
-  if (!base) {
-    return null;
-  }
-  if (!/^\d+$/.test(frameRaw)) {
-    return null;
-  }
-  const frame = Number(frameRaw);
-  if (!Number.isFinite(frame) || frame < 0) {
-    return null;
-  }
-  return { base, frame };
+  return ViewerController.parseFrameSuffix(raw);
 }
 
 function seekViewerFromInput(): void {
@@ -3827,15 +3447,11 @@ function seekViewerFromInput(): void {
 }
 
 function getCurrentViewerTimeParts(): { seconds: number; frame: number } {
-  if (!viewerVideoNode || !viewerActiveVideoContext) {
-    return { seconds: 0, frame: 0 };
-  }
-  const safeTime = Math.max(0, Number.isFinite(viewerVideoNode.currentTime) ? viewerVideoNode.currentTime : 0);
-  const wholeSeconds = Math.floor(safeTime);
-  const fractional = safeTime - wholeSeconds;
-  const frameBase = getViewerFrameBase();
-  const frame = Math.max(0, Math.min(frameBase - 1, Math.floor(fractional * frameBase + 1e-6)));
-  return { seconds: wholeSeconds, frame };
+  return ViewerController.getCurrentViewerTimeParts(
+    viewerVideoNode,
+    viewerActiveVideoContext,
+    getViewerFrameBase()
+  );
 }
 
 function updateMcvSourceVideoTimestampFromCurrentViewer(): void {
@@ -3872,49 +3488,11 @@ function updateMcvSourceVideoTimestampFromCurrentViewer(): void {
 }
 
 function getShareBaseUrl(): URL {
-  const candidates: Array<() => string> = [
-    () => window.top?.location.href ?? "",
-    () => window.parent?.location.href ?? "",
-    () => window.location.href,
-  ];
-  for (const getHref of candidates) {
-    try {
-      const href = getHref();
-      if (!href) {
-        continue;
-      }
-      return new URL(href);
-    } catch {
-      // Ignore inaccessible cross-origin frames and invalid URL values.
-    }
-  }
-  return new URL(window.location.href);
+  return ViewerController.getShareBaseUrl();
 }
 
 function buildViewerShareUrl(): string | null {
-  const context = viewerActiveVideoContext;
-  if (!context) {
-    return null;
-  }
-  const shareUrl = getShareBaseUrl();
-  shareUrl.hash = "";
-  shareUrl.search = "";
-
-  const { seconds, frame } = getCurrentViewerTimeParts();
-  const preferredId =
-    context.id && context.id !== "raw-url" && context.id !== "upload-file"
-      ? context.id
-      : "";
-  if (preferredId) {
-    shareUrl.searchParams.set("id", preferredId);
-  } else if (context.youtubeId) {
-    shareUrl.searchParams.set("yt", context.youtubeId);
-  } else {
-    return null;
-  }
-  shareUrl.searchParams.set("t", String(seconds));
-  shareUrl.searchParams.set("f", String(frame));
-  return shareUrl.toString();
+  return ViewerController.buildViewerShareUrl(viewerActiveVideoContext, getCurrentViewerTimeParts());
 }
 
 async function copyViewerShareLink(copyButton: HTMLButtonElement | null): Promise<void> {
@@ -3947,14 +3525,7 @@ async function copyViewerShareLink(copyButton: HTMLButtonElement | null): Promis
 }
 
 function buildViewerYoutubeUrl(): string | null {
-  if (!viewerActiveVideoContext?.youtubeId) {
-    return null;
-  }
-  const { seconds } = getCurrentViewerTimeParts();
-  const ytUrl = new URL("https://www.youtube.com/watch");
-  ytUrl.searchParams.set("v", viewerActiveVideoContext.youtubeId);
-  ytUrl.searchParams.set("t", String(seconds));
-  return ytUrl.toString();
+  return ViewerController.buildViewerYoutubeUrl(viewerActiveVideoContext, getCurrentViewerTimeParts());
 }
 
 function openViewerInYoutube(): void {
