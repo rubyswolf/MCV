@@ -26,23 +26,6 @@ core = {
     "Algorithm": [],
 }
 
-imgproc = {
-    "": [
-        "cvtColor",
-        "resize",
-        "line",
-        "circle",
-        "rectangle",
-        "putText",
-        "createLineSegmentDetector",
-    ],
-    "LineSegmentDetector": [
-        "detect",
-        "drawSegments",
-        "compareSegments",
-    ],
-}
-
 calib3d = {
     "": [
         "Rodrigues",
@@ -53,4 +36,4 @@ calib3d = {
     ],
 }
 
-white_list = makeWhiteList([core, imgproc, calib3d])
+white_list = makeWhiteList([core, calib3d])

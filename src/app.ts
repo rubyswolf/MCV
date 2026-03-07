@@ -8,7 +8,7 @@ import {
   buildPoseCorrespondencesFromStructure as buildPoseCorrespondencesFromStructureImpl,
   createMcvClient,
 } from "./app/mcvClient";
-type McvOperation = "cv.opencvTest" | "cv.poseSolve";
+type McvOperation = "cv.poseSolve";
 
 type McvRequest<TArgs = Record<string, unknown>> = {
   op: McvOperation;
@@ -30,19 +30,6 @@ type McvFailure = {
 };
 
 type McvResponse<TData> = McvSuccess<TData> | McvFailure;
-
-type McvOpencvTestResult = {
-  opencv_version: string;
-  gray_values: number[];
-  shape: number[];
-  mean_gray: number;
-};
-
-type McvImagePipelineArgs = {
-  image_data_url: string;
-  canny_threshold1?: number;
-  canny_threshold2?: number;
-};
 
 type McvPoseSolveArgs = {
   width: number;
@@ -182,24 +169,6 @@ type VertexSolveCoord = {
   z?: number;
 };
 
-type McvImagePipelineResult = {
-  grayscale_image_data_url: string;
-  line_segments: McvLineSegment[];
-  width: number;
-  height: number;
-  duration_ms?: number;
-};
-
-type McvImagePipelineHttpResponse = {
-  ok: boolean;
-  data?: McvImagePipelineResult;
-  error?: {
-    code?: string;
-    message?: string;
-    details?: unknown;
-  };
-};
-
 type McvMediaApi = {
   url: string;
   available: () => boolean;
@@ -216,7 +185,6 @@ type McvClientApi = {
   data: McvDataApi;
   mcv: {
     call: typeof callMcvApi;
-    runImagePipeline: typeof runImagePipeline;
     runPoseSolve: typeof runPoseSolve;
     backend: "python" | "web";
   };
@@ -285,7 +253,6 @@ declare const __MCV_OPENCV_URL__: string;
 declare const __MCV_MEDIA_API_URL__: string;
 declare const __MCV_DATA_API_URL__: string;
 
-let cvPromise: Promise<unknown> | null = null;
 let activeMediaTab: MediaTab = "videos";
 let mediaLoadState: MediaLoadState = "loading";
 let mediaSearchQuery = "";
@@ -816,10 +783,6 @@ function wrapDegrees180(angleDeg: number): number {
   return Geometry.wrapDegrees180(angleDeg);
 }
 
-async function runImagePipeline(args: McvImagePipelineArgs): Promise<McvImagePipelineResult> {
-  return await mcvRuntime.runImagePipeline(args);
-}
-
 async function runPoseSolve(args: McvPoseSolveArgs): Promise<McvPoseSolveResult> {
   return await mcvRuntime.runPoseSolve(args);
 }
@@ -852,7 +815,6 @@ function installGlobalApi(): void {
     },
     mcv: {
       call: callMcvApi,
-      runImagePipeline: runImagePipeline,
       runPoseSolve: runPoseSolve,
       backend: __MCV_BACKEND__,
     },

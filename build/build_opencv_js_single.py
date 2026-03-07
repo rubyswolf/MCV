@@ -140,10 +140,21 @@ def resolve_emscripten_dir(explicit: Path | None, repo_root: Path) -> Path | Non
     candidates.append(Path("C:/dev/build/emsdk/upstream/emscripten"))
     # Relative fallback near repository root.
     candidates.append((repo_root.parent / "build" / "emsdk" / "upstream" / "emscripten"))
+    candidates.append(Path("C:/dev/emsdk/upstream/emscripten"))
+
+    for tool in ("emcc", "em++", "emcc.bat", "em++.bat"):
+        tool_path = shutil.which(tool)
+        if not tool_path:
+            continue
+        tool_parent = Path(tool_path).resolve().parent
+        candidates.append(tool_parent)
+        # If emcc is in upstream/emscripten, include that exact dir explicitly.
+        if tool_parent.name.lower() == "emscripten":
+            candidates.append(tool_parent)
 
     for cand in candidates:
         cand = cand.resolve()
-        if (cand / "emcc.py").exists():
+        if (cand / "emcc.py").exists() or (cand / "emcc").exists() or (cand / "emcc.bat").exists():
             return cand
     return None
 
@@ -282,8 +293,8 @@ def main() -> None:
 
     if emscripten_dir is None:
         raise RuntimeError(
-            "Could not find Emscripten. Either run emsdk_env.bat in this shell, "
-            "or pass --emscripten-dir <path-to-emsdk/upstream/emscripten>."
+            "Could not find Emscripten. Make sure an SDK is installed and activated, then run "
+            "emsdk_env.bat in this shell, or pass --emscripten-dir <path-to-emsdk/upstream/emscripten>."
         )
 
     env = os.environ.copy()

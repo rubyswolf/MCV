@@ -1,8 +1,6 @@
 #!/usr/bin/env python3
 import sys
 from pathlib import Path
-import base64
-import time
 import math
 
 REQUIREMENTS_FILENAME = "mcv-requirements.txt"
@@ -40,72 +38,6 @@ except ImportError as exc:
 # @mcv-insert HTML_PAGE
 
 app = Flask(__name__)
-
-
-def parse_positive_float(value, default_value):
-    try:
-        parsed = float(value)
-    except (TypeError, ValueError):
-        return float(default_value)
-    if parsed < 0:
-        return 0.0
-    return parsed
-
-
-def decode_image_data_url_to_bgr(image_data_url):
-    if not isinstance(image_data_url, str) or "," not in image_data_url:
-        raise ValueError("Invalid image_data_url")
-    header, encoded = image_data_url.split(",", 1)
-    if ";base64" not in header:
-        raise ValueError("image_data_url must be base64 encoded")
-    try:
-        raw_bytes = base64.b64decode(encoded, validate=True)
-    except Exception as exc:
-        raise ValueError("Invalid image_data_url base64 payload") from exc
-    buffer = np.frombuffer(raw_bytes, dtype=np.uint8)
-    image_bgr = cv2.imdecode(buffer, cv2.IMREAD_COLOR)
-    if image_bgr is None:
-        raise ValueError("Could not decode image data")
-    return image_bgr
-
-
-def encode_png_data_url(image):
-    ok, encoded = cv2.imencode(".png", image)
-    if not ok:
-        raise ValueError("Failed to encode PNG")
-    payload = base64.b64encode(encoded.tobytes()).decode("ascii")
-    return f"data:image/png;base64,{payload}"
-
-
-def run_pipeline(args):
-    started_at = time.time()
-    image_data_url = args.get("image_data_url")
-    image_bgr = decode_image_data_url_to_bgr(image_data_url)
-    gray = np.mean(image_bgr, axis=2).astype(np.uint8)
-    if not hasattr(cv2, "createLineSegmentDetector"):
-        raise ValueError("LineSegmentDetector is unavailable in this OpenCV build")
-    lsd = cv2.createLineSegmentDetector(cv2.LSD_REFINE_STD)
-    detect_result = lsd.detect(gray)
-    lines = detect_result[0] if isinstance(detect_result, tuple) else detect_result
-    line_segments = []
-    if lines is not None:
-        for raw in lines[:, 0, :]:
-            line_segments.append(
-                [
-                    float(raw[0]),
-                    float(raw[1]),
-                    float(raw[2]),
-                    float(raw[3]),
-                ]
-            )
-    duration_ms = int((time.time() - started_at) * 1000)
-    return {
-        "grayscale_image_data_url": encode_png_data_url(gray),
-        "line_segments": line_segments,
-        "width": int(gray.shape[1]),
-        "height": int(gray.shape[0]),
-        "duration_ms": duration_ms,
-    }
 
 
 def _is_finite_number(value):
@@ -554,17 +486,6 @@ def run_pose_solve(args):
     }
 
 
-def handle_mcv_cv_opencv_test(_args):
-    rgb = np.array([[[255, 0, 0], [0, 255, 0], [0, 0, 255]]], dtype=np.uint8)
-    gray = cv2.cvtColor(rgb, cv2.COLOR_RGB2GRAY)
-    return {
-        "opencv_version": cv2.__version__,
-        "gray_values": gray.reshape(-1).tolist(),
-        "shape": [int(gray.shape[0]), int(gray.shape[1])],
-        "mean_gray": float(np.mean(gray)),
-    }
-
-
 @app.get("/api/mcv/health")
 def api_mcv_health():
     return jsonify({
@@ -580,8 +501,6 @@ def api_mcv():
     op = payload.get("op")
     args = payload.get("args") or {}
 
-    if op == "cv.opencvTest":
-        return jsonify({"ok": True, "data": handle_mcv_cv_opencv_test(args)})
     if op == "cv.poseSolve":
         try:
             return jsonify({"ok": True, "data": run_pose_solve(args)})
@@ -611,44 +530,6 @@ def api_mcv():
         ),
         400,
     )
-
-
-@app.post("/api/mcv/pipeline")
-def api_mcv_pipeline():
-    payload = request.get_json(silent=True) or {}
-    args = payload.get("args") or {}
-    image_data_url = args.get("image_data_url")
-    if not isinstance(image_data_url, str) or not image_data_url.strip():
-        return (
-            jsonify(
-                {
-                    "ok": False,
-                    "error": {
-                        "code": "INVALID_ARGS",
-                        "message": "image_data_url is required",
-                    },
-                }
-            ),
-            400,
-        )
-
-    try:
-        result = run_pipeline(args)
-    except Exception as exc:
-        return (
-            jsonify(
-                {
-                    "ok": False,
-                    "error": {
-                        "code": "PIPELINE_ERROR",
-                        "message": str(exc),
-                    },
-                }
-            ),
-            400,
-        )
-
-    return jsonify({"ok": True, "data": result})
 
 
 @app.get("/")

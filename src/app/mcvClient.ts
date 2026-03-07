@@ -1,6 +1,6 @@
 import { wrapDegrees180 } from "./geometry";
 
-type McvOperation = "cv.opencvTest" | "cv.poseSolve";
+type McvOperation = "cv.poseSolve";
 
 type McvRequest<TArgs = Record<string, unknown>> = {
   op: McvOperation;
@@ -22,39 +22,6 @@ type McvFailure = {
 };
 
 type McvResponse<TData> = McvSuccess<TData> | McvFailure;
-
-type McvOpencvTestResult = {
-  opencv_version: string;
-  gray_values: number[];
-  shape: number[];
-  mean_gray: number;
-};
-
-type McvLineSegment = [number, number, number, number];
-
-type McvImagePipelineArgs = {
-  image_data_url: string;
-  canny_threshold1?: number;
-  canny_threshold2?: number;
-};
-
-type McvImagePipelineResult = {
-  grayscale_image_data_url: string;
-  line_segments: McvLineSegment[];
-  width: number;
-  height: number;
-  duration_ms?: number;
-};
-
-type McvImagePipelineHttpResponse = {
-  ok: boolean;
-  data?: McvImagePipelineResult;
-  error?: {
-    code?: string;
-    message?: string;
-    details?: unknown;
-  };
-};
 
 type ManualAxis = "x" | "y" | "z";
 
@@ -148,7 +115,6 @@ type McvClientConfig = {
 
 type McvClientRuntime = {
   callMcvApi: <TData>(requestBody: McvRequest) => Promise<McvResponse<TData>>;
-  runImagePipeline: (args: McvImagePipelineArgs) => Promise<McvImagePipelineResult>;
   runPoseSolve: (args: McvPoseSolveArgs) => Promise<McvPoseSolveResult>;
   fetchMediaApi: () => Promise<Response>;
   isMediaApiAvailable: () => boolean;
@@ -197,109 +163,6 @@ function loadScriptOnce(scriptUrl: string): Promise<void> {
     });
     document.head.appendChild(script);
   });
-}
-
-async function decodeImageDataUrlToCanvas(dataUrl: string): Promise<HTMLCanvasElement> {
-  return await new Promise<HTMLCanvasElement>((resolve, reject) => {
-    const image = new Image();
-    image.decoding = "async";
-    image.onload = () => {
-      const width = image.naturalWidth || image.width;
-      const height = image.naturalHeight || image.height;
-      if (width <= 0 || height <= 0) {
-        reject(new Error("Decoded image has invalid dimensions"));
-        return;
-      }
-      const canvas = document.createElement("canvas");
-      canvas.width = width;
-      canvas.height = height;
-      const ctx = canvas.getContext("2d");
-      if (!ctx) {
-        reject(new Error("Canvas context unavailable"));
-        return;
-      }
-      ctx.drawImage(image, 0, 0, width, height);
-      resolve(canvas);
-    };
-    image.onerror = () => {
-      reject(new Error("Failed to decode image_data_url"));
-    };
-    image.src = dataUrl;
-  });
-}
-
-function grayArrayToPngDataUrl(gray: Uint8Array, width: number, height: number): string {
-  const canvas = document.createElement("canvas");
-  canvas.width = width;
-  canvas.height = height;
-  const ctx = canvas.getContext("2d");
-  if (!ctx) {
-    throw new Error("Canvas context unavailable");
-  }
-
-  const rgba = new Uint8ClampedArray(width * height * 4);
-  for (let i = 0, p = 0; i < gray.length; i += 1, p += 4) {
-    const value = gray[i];
-    rgba[p] = value;
-    rgba[p + 1] = value;
-    rgba[p + 2] = value;
-    rgba[p + 3] = 255;
-  }
-  ctx.putImageData(new ImageData(rgba, width, height), 0, 0);
-  return canvas.toDataURL("image/png");
-}
-
-function decodeLineSegmentsFromMat(linesMat: any): McvLineSegment[] {
-  if (!linesMat || typeof linesMat.rows !== "number" || linesMat.rows <= 0) {
-    return [];
-  }
-  const data = linesMat.data32F as Float32Array | undefined;
-  if (!data || data.length < 4) {
-    return [];
-  }
-  const segments: McvLineSegment[] = [];
-  for (let i = 0; i + 3 < data.length; i += 4) {
-    segments.push([data[i], data[i + 1], data[i + 2], data[i + 3]]);
-  }
-  return segments;
-}
-
-function detectLineSegmentsWeb(cv: any, grayMat: any): McvLineSegment[] {
-  let lsd: any = null;
-  let linesMat: any = null;
-  let widthsMat: any = null;
-  let precisionsMat: any = null;
-  let nfasMat: any = null;
-  try {
-    try {
-      lsd = cv.createLineSegmentDetector(cv.LSD_REFINE_STD ?? 1);
-    } catch {
-      lsd = cv.createLineSegmentDetector();
-    }
-    linesMat = new cv.Mat();
-    widthsMat = new cv.Mat();
-    precisionsMat = new cv.Mat();
-    nfasMat = new cv.Mat();
-    // OpenCV.js binding requires explicit output mats for detect(...).
-    lsd.detect(grayMat, linesMat, widthsMat, precisionsMat, nfasMat);
-    return decodeLineSegmentsFromMat(linesMat);
-  } finally {
-    if (nfasMat && typeof nfasMat.delete === "function") {
-      nfasMat.delete();
-    }
-    if (precisionsMat && typeof precisionsMat.delete === "function") {
-      precisionsMat.delete();
-    }
-    if (widthsMat && typeof widthsMat.delete === "function") {
-      widthsMat.delete();
-    }
-    if (linesMat && typeof linesMat.delete === "function") {
-      linesMat.delete();
-    }
-    if (lsd && typeof lsd.delete === "function") {
-      lsd.delete();
-    }
-  }
 }
 
 export function buildPoseCorrespondencesFromStructure(
@@ -966,79 +829,6 @@ export function createMcvClient(config: McvClientConfig): McvClientRuntime {
     return cvPromise;
   }
 
-  async function runWebImagePipeline(
-    args: McvImagePipelineArgs
-  ): Promise<McvImagePipelineResult> {
-    const cv = await getWebMcvRuntime();
-    const startedAtMs = performance.now();
-    const canvas = await decodeImageDataUrlToCanvas(args.image_data_url);
-    const ctx = canvas.getContext("2d");
-    if (!ctx) {
-      throw new Error("Canvas context unavailable");
-    }
-    const width = canvas.width;
-    const height = canvas.height;
-    const imageData = ctx.getImageData(0, 0, width, height);
-    const src = imageData.data;
-
-    const gray = new Uint8Array(width * height);
-    for (let srcIndex = 0, dstIndex = 0; srcIndex < src.length; srcIndex += 4, dstIndex += 1) {
-      gray[dstIndex] = Math.round((src[srcIndex] + src[srcIndex + 1] + src[srcIndex + 2]) / 3);
-    }
-
-    let grayMat: any = null;
-    let lineSegments: McvLineSegment[] = [];
-    try {
-      grayMat = new cv.Mat(height, width, cv.CV_8UC1);
-      grayMat.data.set(gray);
-      lineSegments = detectLineSegmentsWeb(cv, grayMat);
-    } finally {
-      if (grayMat) {
-        grayMat.delete();
-      }
-    }
-
-    return {
-      grayscale_image_data_url: grayArrayToPngDataUrl(gray, width, height),
-      line_segments: lineSegments,
-      width,
-      height,
-      duration_ms: Math.max(0, Math.round(performance.now() - startedAtMs)),
-    };
-  }
-
-  async function runPythonImagePipeline(
-    args: McvImagePipelineArgs
-  ): Promise<McvImagePipelineResult> {
-    const response = await fetch("/api/mcv/pipeline", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ args }),
-    });
-    if (!response.ok) {
-      throw new Error(`HTTP ${response.status}`);
-    }
-
-    const payload = (await response.json()) as McvImagePipelineHttpResponse;
-    if (!payload.ok || !payload.data) {
-      const message = payload.error?.message || "Pipeline failed";
-      throw new Error(message);
-    }
-    return payload.data;
-  }
-
-  async function runImagePipeline(args: McvImagePipelineArgs): Promise<McvImagePipelineResult> {
-    if (!args || typeof args.image_data_url !== "string" || !args.image_data_url.trim()) {
-      throw new Error("image_data_url is required");
-    }
-
-    if (config.backend === "web") {
-      return await runWebImagePipeline(args);
-    }
-
-    return await runPythonImagePipeline(args);
-  }
-
   async function runPoseSolve(args: McvPoseSolveArgs): Promise<McvPoseSolveResult> {
     if (config.backend === "web") {
       return await runWebPoseSolve(getWebMcvRuntime, args);
@@ -1055,7 +845,7 @@ export function createMcvClient(config: McvClientConfig): McvClientRuntime {
 
   async function callMcvApi<TData>(requestBody: McvRequest): Promise<McvResponse<TData>> {
     if (config.backend === "web") {
-      if (requestBody.op !== "cv.opencvTest" && requestBody.op !== "cv.poseSolve") {
+      if (requestBody.op !== "cv.poseSolve") {
         return {
           ok: false,
           error: {
@@ -1066,33 +856,11 @@ export function createMcvClient(config: McvClientConfig): McvClientRuntime {
       }
 
       try {
-        if (requestBody.op === "cv.poseSolve") {
-          const data = await runWebPoseSolve(getWebMcvRuntime, requestBody.args as McvPoseSolveArgs);
-          return {
-            ok: true,
-            data,
-          } as McvResponse<TData>;
-        }
-        const cv = await getWebMcvRuntime();
-        const src = cv.matFromArray(1, 3, cv.CV_8UC3, [255, 0, 0, 0, 255, 0, 0, 0, 255]);
-        const gray = new cv.Mat();
-        cv.cvtColor(src, gray, cv.COLOR_RGB2GRAY);
-        const grayValues = Array.from(gray.data as Uint8Array).map((value) => Number(value));
-        const response = {
+        const data = await runWebPoseSolve(getWebMcvRuntime, requestBody.args as McvPoseSolveArgs);
+        return {
           ok: true,
-          data: {
-            opencv_version: String((cv as any).VERSION ?? "opencv.js"),
-            gray_values: grayValues,
-            shape: [Number(gray.rows), Number(gray.cols)],
-            mean_gray:
-              grayValues.length > 0
-                ? grayValues.reduce((sum, value) => sum + value, 0) / grayValues.length
-                : 0,
-          },
-        } satisfies McvSuccess<McvOpencvTestResult>;
-        src.delete();
-        gray.delete();
-        return response as McvResponse<TData>;
+          data,
+        } as McvResponse<TData>;
       } catch (error) {
         return {
           ok: false,
@@ -1149,7 +917,6 @@ export function createMcvClient(config: McvClientConfig): McvClientRuntime {
 
   return {
     callMcvApi,
-    runImagePipeline,
     runPoseSolve,
     fetchMediaApi,
     isMediaApiAvailable,
