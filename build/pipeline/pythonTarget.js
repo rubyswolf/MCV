@@ -52,7 +52,10 @@ async function buildPythonTarget(options = {}) {
   await ensureDir(DIST_PYTHON_DIR);
 
   const standaloneScriptPath = path.join(DIST_PYTHON_DIR, "mcv_standalone.py");
-  const standaloneScript = renderPythonStandaloneScript(commonArtifacts.inlineHtml, requirementsText);
+  const standaloneScript = await renderPythonStandaloneScript(
+    commonArtifacts.inlineHtml,
+    requirementsText
+  );
   await fs.writeFile(standaloneScriptPath, standaloneScript, "utf8");
 
   return {
