@@ -32,6 +32,7 @@ async function buildCommonArtifacts() {
 
   const appEntry = path.join(SRC_DIR, "app.ts");
   const htmlTemplatePath = path.join(SRC_DIR, "template.html");
+  const cssTemplatePath = path.join(SRC_DIR, "template.css");
   const appBundlePath = path.join(DIST_COMMON_DIR, "app.bundle.js");
   const inlineHtmlPath = path.join(DIST_COMMON_DIR, "index.inline.html");
 
@@ -57,6 +58,7 @@ async function buildCommonArtifacts() {
   await fs.writeFile(appBundlePath, appBundle, "utf8");
 
   const template = await fs.readFile(htmlTemplatePath, "utf8");
+  const cssTemplate = await fs.readFile(cssTemplatePath, "utf8");
   const bodyStyleBlock =
     backendMode === "web"
       ? [
@@ -78,8 +80,9 @@ async function buildCommonArtifacts() {
     backendMode === "web"
       ? `<script src="${opencvUrl.replace(/"/g, "&quot;")}"></script>`
       : "";
+  const css = cssTemplate.replace("__MCV_BODY_STYLE__", () => bodyStyleBlock);
   const inlineHtml = template
-    .replace("__MCV_BODY_STYLE__", () => bodyStyleBlock)
+    .replace("__MCV_CSS__", () => css)
     .replace("__BACKEND_SCRIPTS__", () => backendScripts)
     .replace("__APP_JS__", () => safeInlineBundle);
   await fs.writeFile(inlineHtmlPath, inlineHtml, "utf8");

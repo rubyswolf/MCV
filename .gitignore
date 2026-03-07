@@ -1,3 +1,6 @@
-build/opencv_js_mcv_single
+build/opencv_js_mcv_single/*
+!build/opencv_js_mcv_single/bin/
+build/opencv_js_mcv_single/bin/*
+!build/opencv_js_mcv_single/bin/opencv.js
 node_modules
 dist
