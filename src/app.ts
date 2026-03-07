@@ -1,3 +1,10 @@
+import * as Geometry from "./app/geometry";
+import * as MediaUtils from "./app/mediaUtils";
+import * as SvgUtils from "./app/svgUtils";
+import {
+  buildPoseCorrespondencesFromStructure as buildPoseCorrespondencesFromStructureImpl,
+  createMcvClient,
+} from "./app/mcvClient";
 type McvOperation = "cv.opencvTest" | "cv.poseSolve";
 
 type McvRequest<TArgs = Record<string, unknown>> = {
@@ -470,24 +477,11 @@ function startViewerFrameRateProbe(video: HTMLVideoElement): void {
   };
 }
 
-function getAnnotationLength(annotation: ManualAnnotation): number {
-  return Math.hypot(annotation.to.x - annotation.from.x, annotation.to.y - annotation.from.y);
-}
 
-function computeStructureLinkThreshold(annotations: ManualAnnotation[]): number {
-  if (annotations.length === 0) {
-    return 3;
-  }
-  const lengths = annotations
-    .map((annotation) => getAnnotationLength(annotation))
-    .filter((value) => Number.isFinite(value) && value > 0)
-    .sort((a, b) => a - b);
-  if (lengths.length === 0) {
-    return 3;
-  }
-  const median = lengths[Math.floor(lengths.length / 2)];
-  return Math.max(2, Math.min(10, median * 0.08));
-}
+
+
+
+
 
 function linkStructureEndpoints(
   firstLine: StructureLine,
@@ -526,17 +520,11 @@ function createStructureLineFromAnnotation(annotation: ManualAnnotation): Struct
   };
 }
 
-function normalizeLineRefs(values: number[]): number[] {
-  return Array.from(new Set(values)).sort((a, b) => a - b);
-}
 
-function remapLineRefsAfterLineRemoval(values: number[], removedLineIndex: number): number[] {
-  return normalizeLineRefs(
-    values
-      .filter((value) => value !== removedLineIndex)
-      .map((value) => (value > removedLineIndex ? value - 1 : value))
-  );
-}
+
+
+
+
 
 function syncStructureEndpointRefs(): void {
   MCV_DATA.structure.lines.forEach((line) => {
@@ -581,8 +569,8 @@ function rebuildAnchorsAndVerticesAfterLineRemoval(removedLineIndex: number): vo
 
   const keptAnchors = oldAnchors
     .map((anchor, oldAnchorIndex) => {
-      const from = remapLineRefsAfterLineRemoval(anchor.from, removedLineIndex);
-      const to = remapLineRefsAfterLineRemoval(anchor.to, removedLineIndex);
+      const from = Geometry.remapLineRefsAfterLineRemoval(anchor.from, removedLineIndex);
+      const to = Geometry.remapLineRefsAfterLineRemoval(anchor.to, removedLineIndex);
       if (from.length === 0 && to.length === 0) {
         return null;
       }
@@ -599,8 +587,8 @@ function rebuildAnchorsAndVerticesAfterLineRemoval(removedLineIndex: number): vo
 
   const remappedVertices = oldVertices.map((vertex) => ({
     ...vertex,
-    from: remapLineRefsAfterLineRemoval(vertex.from, removedLineIndex),
-    to: remapLineRefsAfterLineRemoval(vertex.to, removedLineIndex),
+    from: Geometry.remapLineRefsAfterLineRemoval(vertex.from, removedLineIndex),
+    to: Geometry.remapLineRefsAfterLineRemoval(vertex.to, removedLineIndex),
   }));
 
   const newVertices: StructureVertexData[] = [];
@@ -618,8 +606,8 @@ function rebuildAnchorsAndVerticesAfterLineRemoval(removedLineIndex: number): vo
     const vertexFrom = oldVertex ? oldVertex.from : entry.anchor.from;
     const vertexTo = oldVertex ? oldVertex.to : entry.anchor.to;
     const nextVertex: StructureVertexData = {
-      from: normalizeLineRefs(vertexFrom.length > 0 ? vertexFrom : entry.anchor.from),
-      to: normalizeLineRefs(vertexTo.length > 0 ? vertexTo : entry.anchor.to),
+      from: Geometry.normalizeLineRefs(vertexFrom.length > 0 ? vertexFrom : entry.anchor.from),
+      to: Geometry.normalizeLineRefs(vertexTo.length > 0 ? vertexTo : entry.anchor.to),
       ...(oldVertex?.x !== undefined ? { x: oldVertex.x } : {}),
       ...(oldVertex?.y !== undefined ? { y: oldVertex.y } : {}),
       ...(oldVertex?.z !== undefined ? { z: oldVertex.z } : {}),
@@ -638,22 +626,22 @@ function rebuildAnchorsAndVerticesAfterLineRemoval(removedLineIndex: number): vo
     }
     newVertices.push({
       ...vertex,
-      from: normalizeLineRefs(vertex.from),
-      to: normalizeLineRefs(vertex.to),
+      from: Geometry.normalizeLineRefs(vertex.from),
+      to: Geometry.normalizeLineRefs(vertex.to),
     });
   });
 
   MCV_DATA.structure.anchors = keptAnchors.map((entry) => ({
     ...entry.anchor,
-    from: normalizeLineRefs(entry.anchor.from),
-    to: normalizeLineRefs(entry.anchor.to),
+    from: Geometry.normalizeLineRefs(entry.anchor.from),
+    to: Geometry.normalizeLineRefs(entry.anchor.to),
   }));
   MCV_DATA.structure.vertices = newVertices;
 }
 
 function createAnchorWithVertex(from: number[], to: number[]): number {
-  const normalizedFrom = normalizeLineRefs(from);
-  const normalizedTo = normalizeLineRefs(to);
+  const normalizedFrom = Geometry.normalizeLineRefs(from);
+  const normalizedTo = Geometry.normalizeLineRefs(to);
   const vertexIndex = MCV_DATA.structure.vertices.length;
   const anchorIndex = MCV_DATA.structure.anchors.length;
   MCV_DATA.structure.vertices.push({
@@ -669,72 +657,11 @@ function createAnchorWithVertex(from: number[], to: number[]): number {
   return anchorIndex;
 }
 
-function getInfiniteLineIntersection(
-  first: ManualAnnotation,
-  second: ManualAnnotation
-): ManualPoint | null {
-  const x1 = first.from.x;
-  const y1 = first.from.y;
-  const x2 = first.to.x;
-  const y2 = first.to.y;
-  const x3 = second.from.x;
-  const y3 = second.from.y;
-  const x4 = second.to.x;
-  const y4 = second.to.y;
-  const denom = (x1 - x2) * (y3 - y4) - (y1 - y2) * (x3 - x4);
-  if (Math.abs(denom) < 1e-9) {
-    return null;
-  }
-  const detFirst = x1 * y2 - y1 * x2;
-  const detSecond = x3 * y4 - y3 * x4;
-  const x = (detFirst * (x3 - x4) - (x1 - x2) * detSecond) / denom;
-  const y = (detFirst * (y3 - y4) - (y1 - y2) * detSecond) / denom;
-  if (!Number.isFinite(x) || !Number.isFinite(y)) {
-    return null;
-  }
-  return { x, y };
-}
 
-function getLeastSquaresLinePoint(lines: ManualAnnotation[]): ManualPoint | null {
-  let a00 = 0;
-  let a01 = 0;
-  let a11 = 0;
-  let b0 = 0;
-  let b1 = 0;
-  let used = 0;
-  for (const line of lines) {
-    const dxRaw = line.to.x - line.from.x;
-    const dyRaw = line.to.y - line.from.y;
-    const length = Math.hypot(dxRaw, dyRaw);
-    if (length < 1e-9) {
-      continue;
-    }
-    used += 1;
-    const dx = dxRaw / length;
-    const dy = dyRaw / length;
-    const m00 = 1 - dx * dx;
-    const m01 = -dx * dy;
-    const m11 = 1 - dy * dy;
-    a00 += m00;
-    a01 += m01;
-    a11 += m11;
-    b0 += m00 * line.from.x + m01 * line.from.y;
-    b1 += m01 * line.from.x + m11 * line.from.y;
-  }
-  if (used < 2) {
-    return null;
-  }
-  const det = a00 * a11 - a01 * a01;
-  if (Math.abs(det) < 1e-9) {
-    return null;
-  }
-  const x = (b0 * a11 - b1 * a01) / det;
-  const y = (a00 * b1 - a01 * b0) / det;
-  if (!Number.isFinite(x) || !Number.isFinite(y)) {
-    return null;
-  }
-  return { x, y };
-}
+
+
+
+
 
 function setStructureEndpointPoint(
   endpointId: number,
@@ -812,10 +739,10 @@ function recomputeStructureGeometryFromConnections(): void {
     let snapPoint: ManualPoint | null = null;
     if (linesForSolve.length === 2) {
       snapPoint =
-        getInfiniteLineIntersection(linesForSolve[0], linesForSolve[1]) ??
-        getLeastSquaresLinePoint(linesForSolve);
+        Geometry.getInfiniteLineIntersection(linesForSolve[0], linesForSolve[1]) ??
+        Geometry.getLeastSquaresLinePoint(linesForSolve);
     } else {
-      snapPoint = getLeastSquaresLinePoint(linesForSolve);
+      snapPoint = Geometry.getLeastSquaresLinePoint(linesForSolve);
     }
     if (!snapPoint) {
       continue;
@@ -838,7 +765,7 @@ function linkLineIndexAgainstOthers(lineIndex: number): void {
   line.to.from.length = 0;
   line.to.to.length = 0;
 
-  const threshold = computeStructureLinkThreshold(MCV_DATA.annotations);
+  const threshold = Geometry.computeStructureLinkThreshold(MCV_DATA.annotations);
   for (let otherIndex = 0; otherIndex < lines.length; otherIndex += 1) {
     if (otherIndex === lineIndex) {
       continue;
@@ -947,837 +874,47 @@ function resetCropInteractionState(): void {
   clearAnnotationsDirty();
 }
 
-function isThenable(value: unknown): value is Promise<unknown> {
-  return typeof value === "object" && value !== null && "then" in value;
-}
-
-function loadScriptOnce(scriptUrl: string): Promise<void> {
-  return new Promise((resolve, reject) => {
-    const existing = document.querySelector(`script[data-mcv-src="${scriptUrl}"]`) as
-      | HTMLScriptElement
-      | null;
-    if (existing) {
-      if (existing.dataset.loaded === "1") {
-        resolve();
-        return;
-      }
-      existing.addEventListener("load", () => resolve(), { once: true });
-      existing.addEventListener("error", () => reject(new Error(`Failed to load ${scriptUrl}`)), {
-        once: true,
-      });
-      return;
-    }
-
-    const script = document.createElement("script");
-    script.src = scriptUrl;
-    script.async = true;
-    script.dataset.mcvSrc = scriptUrl;
-    script.addEventListener(
-      "load",
-      () => {
-        script.dataset.loaded = "1";
-        resolve();
-      },
-      { once: true }
-    );
-    script.addEventListener("error", () => reject(new Error(`Failed to load ${scriptUrl}`)), {
-      once: true,
-    });
-    document.head.appendChild(script);
-  });
-}
-
-async function getWebMcvRuntime(): Promise<any> {
-  if (!cvPromise) {
-    cvPromise = (async () => {
-      const maybeGlobalCv = (globalThis as any).cv;
-      if (!maybeGlobalCv) {
-        await loadScriptOnce(__MCV_OPENCV_URL__);
-      }
-      const cvCandidate = (globalThis as any).cv;
-      if (!cvCandidate) {
-        throw new Error("opencv.js runtime not found on window.cv");
-      }
-      if (typeof cvCandidate === "function") {
-        return await cvCandidate();
-      }
-      if (isThenable(cvCandidate)) {
-        return await cvCandidate;
-      }
-      return cvCandidate;
-    })();
-  }
-  return cvPromise;
-}
-
-async function decodeImageDataUrlToCanvas(dataUrl: string): Promise<HTMLCanvasElement> {
-  return await new Promise<HTMLCanvasElement>((resolve, reject) => {
-    const image = new Image();
-    image.decoding = "async";
-    image.onload = () => {
-      const width = image.naturalWidth || image.width;
-      const height = image.naturalHeight || image.height;
-      if (width <= 0 || height <= 0) {
-        reject(new Error("Decoded image has invalid dimensions"));
-        return;
-      }
-      const canvas = document.createElement("canvas");
-      canvas.width = width;
-      canvas.height = height;
-      const ctx = canvas.getContext("2d");
-      if (!ctx) {
-        reject(new Error("Canvas context unavailable"));
-        return;
-      }
-      ctx.drawImage(image, 0, 0, width, height);
-      resolve(canvas);
-    };
-    image.onerror = () => {
-      reject(new Error("Failed to decode image_data_url"));
-    };
-    image.src = dataUrl;
-  });
-}
-
-function grayArrayToPngDataUrl(gray: Uint8Array, width: number, height: number): string {
-  const canvas = document.createElement("canvas");
-  canvas.width = width;
-  canvas.height = height;
-  const ctx = canvas.getContext("2d");
-  if (!ctx) {
-    throw new Error("Canvas context unavailable");
-  }
-
-  const rgba = new Uint8ClampedArray(width * height * 4);
-  for (let i = 0, p = 0; i < gray.length; i += 1, p += 4) {
-    const value = gray[i];
-    rgba[p] = value;
-    rgba[p + 1] = value;
-    rgba[p + 2] = value;
-    rgba[p + 3] = 255;
-  }
-  ctx.putImageData(new ImageData(rgba, width, height), 0, 0);
-  return canvas.toDataURL("image/png");
-}
-
-function decodeLineSegmentsFromMat(linesMat: any): McvLineSegment[] {
-  if (!linesMat || typeof linesMat.rows !== "number" || linesMat.rows <= 0) {
-    return [];
-  }
-  const data = linesMat.data32F as Float32Array | undefined;
-  if (!data || data.length < 4) {
-    return [];
-  }
-  const segments: McvLineSegment[] = [];
-  for (let i = 0; i + 3 < data.length; i += 4) {
-    segments.push([data[i], data[i + 1], data[i + 2], data[i + 3]]);
-  }
-  return segments;
-}
-
-function detectLineSegmentsWeb(cv: any, grayMat: any): McvLineSegment[] {
-  let lsd: any = null;
-  let linesMat: any = null;
-  let widthsMat: any = null;
-  let precisionsMat: any = null;
-  let nfasMat: any = null;
-  try {
-    try {
-      lsd = cv.createLineSegmentDetector(cv.LSD_REFINE_STD ?? 1);
-    } catch {
-      lsd = cv.createLineSegmentDetector();
-    }
-    linesMat = new cv.Mat();
-    widthsMat = new cv.Mat();
-    precisionsMat = new cv.Mat();
-    nfasMat = new cv.Mat();
-    // OpenCV.js binding requires explicit output mats for detect(...).
-    lsd.detect(grayMat, linesMat, widthsMat, precisionsMat, nfasMat);
-    return decodeLineSegmentsFromMat(linesMat);
-  } finally {
-    if (nfasMat && typeof nfasMat.delete === "function") {
-      nfasMat.delete();
-    }
-    if (precisionsMat && typeof precisionsMat.delete === "function") {
-      precisionsMat.delete();
-    }
-    if (widthsMat && typeof widthsMat.delete === "function") {
-      widthsMat.delete();
-    }
-    if (linesMat && typeof linesMat.delete === "function") {
-      linesMat.delete();
-    }
-    if (lsd && typeof lsd.delete === "function") {
-      lsd.delete();
-    }
-  }
-}
-
-async function runWebImagePipeline(
-  args: McvImagePipelineArgs
-): Promise<McvImagePipelineResult> {
-  const cv = await getWebMcvRuntime();
-  const startedAtMs = performance.now();
-  const canvas = await decodeImageDataUrlToCanvas(args.image_data_url);
-  const ctx = canvas.getContext("2d");
-  if (!ctx) {
-    throw new Error("Canvas context unavailable");
-  }
-  const width = canvas.width;
-  const height = canvas.height;
-  const imageData = ctx.getImageData(0, 0, width, height);
-  const src = imageData.data;
-
-  const gray = new Uint8Array(width * height);
-  for (let srcIndex = 0, dstIndex = 0; srcIndex < src.length; srcIndex += 4, dstIndex += 1) {
-    gray[dstIndex] = Math.round((src[srcIndex] + src[srcIndex + 1] + src[srcIndex + 2]) / 3);
-  }
-
-  let grayMat: any = null;
-  let lineSegments: McvLineSegment[] = [];
-  try {
-    grayMat = new cv.Mat(height, width, cv.CV_8UC1);
-    grayMat.data.set(gray);
-    lineSegments = detectLineSegmentsWeb(cv, grayMat);
-  } finally {
-    if (grayMat) {
-      grayMat.delete();
-    }
-  }
-
-  return {
-    grayscale_image_data_url: grayArrayToPngDataUrl(gray, width, height),
-    line_segments: lineSegments,
-    width,
-    height,
-    duration_ms: Math.max(0, Math.round(performance.now() - startedAtMs)),
-  };
-}
-
-async function runPythonImagePipeline(
-  args: McvImagePipelineArgs
-): Promise<McvImagePipelineResult> {
-  const response = await fetch("/api/mcv/pipeline", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ args }),
-  });
-  if (!response.ok) {
-    throw new Error(`HTTP ${response.status}`);
-  }
-
-  const payload = (await response.json()) as McvImagePipelineHttpResponse;
-  if (!payload.ok || !payload.data) {
-    const message = payload.error?.message || "Pipeline failed";
-    throw new Error(message);
-  }
-  return payload.data;
-}
-
-async function runImagePipeline(args: McvImagePipelineArgs): Promise<McvImagePipelineResult> {
-  if (!args || typeof args.image_data_url !== "string" || !args.image_data_url.trim()) {
-    throw new Error("image_data_url is required");
-  }
-
-  if (__MCV_BACKEND__ === "web") {
-    return await runWebImagePipeline(args);
-  }
-
-  return await runPythonImagePipeline(args);
-}
-
-function isFiniteNumber(value: unknown): value is number {
-  return typeof value === "number" && Number.isFinite(value);
-}
-
-type PoseCorrespondence = {
-  image: [number, number];
-  world: [number, number, number];
-};
+const mcvRuntime = createMcvClient({
+  backend: __MCV_BACKEND__,
+  opencvUrl: __MCV_OPENCV_URL__,
+  mediaApiUrl: __MCV_MEDIA_API_URL__,
+  dataApiUrl: __MCV_DATA_API_URL__,
+});
 
 function buildPoseCorrespondencesFromStructure(
   lines: StructureLine[],
   vertices: StructureVertexData[]
-): PoseCorrespondence[] {
-  const correspondences: PoseCorrespondence[] = [];
-  for (const vertex of vertices) {
-    if (!isFiniteNumber(vertex.x) || !isFiniteNumber(vertex.y) || !isFiniteNumber(vertex.z)) {
-      continue;
-    }
-    const endpointIds = new Set<number>();
-    vertex.from.forEach((lineIndex) => {
-      if (Number.isInteger(lineIndex) && lineIndex >= 0 && lineIndex < lines.length) {
-        endpointIds.add(lineIndex * 2);
-      }
-    });
-    vertex.to.forEach((lineIndex) => {
-      if (Number.isInteger(lineIndex) && lineIndex >= 0 && lineIndex < lines.length) {
-        endpointIds.add(lineIndex * 2 + 1);
-      }
-    });
-    let sumX = 0;
-    let sumY = 0;
-    let count = 0;
-    endpointIds.forEach((endpointId) => {
-      const lineIndex = Math.floor(endpointId / 2);
-      const endpointKey = endpointId % 2 === 0 ? "from" : "to";
-      const line = lines[lineIndex];
-      if (!line) {
-        return;
-      }
-      const endpoint = line[endpointKey];
-      if (!isFiniteNumber(endpoint.x) || !isFiniteNumber(endpoint.y)) {
-        return;
-      }
-      sumX += endpoint.x;
-      sumY += endpoint.y;
-      count += 1;
-    });
-    if (count <= 0) {
-      continue;
-    }
-    correspondences.push({
-      image: [sumX / count, sumY / count],
-      world: [vertex.x, vertex.y, vertex.z],
-    });
-  }
-  return correspondences;
-}
-
-function cameraMatrixFromFocalWeb(cv: any, focal: number, width: number, height: number): any {
-  const cx = (width - 1) * 0.5;
-  const cy = (height - 1) * 0.5;
-  return cv.matFromArray(3, 3, cv.CV_64FC1, [focal, 0, cx, 0, focal, cy, 0, 0, 1]);
-}
-
-function buildPosePointMats(cv: any, correspondences: PoseCorrespondence[]): { objectPts: any; imagePts: any } {
-  const objectData: number[] = [];
-  const imageData: number[] = [];
-  correspondences.forEach((entry) => {
-    objectData.push(entry.world[0], entry.world[1], entry.world[2]);
-    imageData.push(entry.image[0], entry.image[1]);
-  });
-  return {
-    objectPts: cv.matFromArray(correspondences.length, 1, cv.CV_64FC3, objectData),
-    imagePts: cv.matFromArray(correspondences.length, 1, cv.CV_64FC2, imageData),
-  };
-}
-
-function extractInlierIndexesFromMat(inliersMat: any, pointCount: number): number[] {
-  if (!inliersMat || typeof inliersMat.rows !== "number" || inliersMat.rows <= 0) {
-    return [];
-  }
-  const raw: number[] = [];
-  const data32S = inliersMat.data32S as Int32Array | undefined;
-  const data32F = inliersMat.data32F as Float32Array | undefined;
-  const data64F = inliersMat.data64F as Float64Array | undefined;
-  if (data32S && data32S.length > 0) {
-    for (let i = 0; i < data32S.length; i += 1) {
-      raw.push(Number(data32S[i]));
-    }
-  } else if (data32F && data32F.length > 0) {
-    for (let i = 0; i < data32F.length; i += 1) {
-      raw.push(Math.round(Number(data32F[i])));
-    }
-  } else if (data64F && data64F.length > 0) {
-    for (let i = 0; i < data64F.length; i += 1) {
-      raw.push(Math.round(Number(data64F[i])));
-    }
-  }
-  return Array.from(
-    new Set(
-      raw.filter((index) => Number.isInteger(index) && index >= 0 && index < pointCount)
-    )
-  ).sort((a, b) => a - b);
-}
-
-function getVec3FromMat(mat: any): [number, number, number] {
-  const data64 = mat?.data64F as Float64Array | undefined;
-  if (data64 && data64.length >= 3) {
-    return [Number(data64[0]), Number(data64[1]), Number(data64[2])];
-  }
-  const data32 = mat?.data32F as Float32Array | undefined;
-  if (data32 && data32.length >= 3) {
-    return [Number(data32[0]), Number(data32[1]), Number(data32[2])];
-  }
-  return [0, 0, 0];
-}
-
-function evaluatePoseForFocalWeb(
-  cv: any,
-  correspondences: PoseCorrespondence[],
-  width: number,
-  height: number,
-  focal: number
-): {
-  cost: number;
-  inlierCount: number;
-  rvec: [number, number, number];
-  tvec: [number, number, number];
-  rmse: number;
-} {
-  let objectPts: any = null;
-  let imagePts: any = null;
-  let camera: any = null;
-  let dist: any = null;
-  let rvec: any = null;
-  let tvec: any = null;
-  let inliers: any = null;
-  let projected: any = null;
-  let objectPtsInlier: any = null;
-  let imagePtsInlier: any = null;
-  try {
-    const mats = buildPosePointMats(cv, correspondences);
-    objectPts = mats.objectPts;
-    imagePts = mats.imagePts;
-    camera = cameraMatrixFromFocalWeb(cv, focal, width, height);
-    dist = cv.Mat.zeros(4, 1, cv.CV_64FC1);
-    rvec = new cv.Mat();
-    tvec = new cv.Mat();
-    inliers = new cv.Mat();
-
-    const pointCount = correspondences.length;
-    let ok = false;
-    try {
-      ok = cv.solvePnPRansac(
-        objectPts,
-        imagePts,
-        camera,
-        dist,
-        rvec,
-        tvec,
-        false,
-        800,
-        4.0,
-        0.999,
-        inliers,
-        cv.SOLVEPNP_EPNP
-      );
-    } catch {
-      ok = false;
-    }
-
-    if (!ok) {
-      try {
-        ok = cv.solvePnP(
-          objectPts,
-          imagePts,
-          camera,
-          dist,
-          rvec,
-          tvec,
-          false,
-          cv.SOLVEPNP_ITERATIVE
-        );
-      } catch {
-        ok = false;
-      }
-      if (!ok) {
-        return {
-          cost: Number.POSITIVE_INFINITY,
-          inlierCount: 0,
-          rvec: [0, 0, 0],
-          tvec: [0, 0, 0],
-          rmse: Number.POSITIVE_INFINITY,
-        };
-      }
-    }
-
-    let inlierIndexes = extractInlierIndexesFromMat(inliers, pointCount);
-    if (inlierIndexes.length < 4) {
-      inlierIndexes = Array.from({ length: pointCount }, (_, index) => index);
-    }
-    const objectInlierData: number[] = [];
-    const imageInlierData: number[] = [];
-    inlierIndexes.forEach((index) => {
-      objectInlierData.push(
-        correspondences[index].world[0],
-        correspondences[index].world[1],
-        correspondences[index].world[2]
-      );
-      imageInlierData.push(correspondences[index].image[0], correspondences[index].image[1]);
-    });
-    objectPtsInlier = cv.matFromArray(inlierIndexes.length, 1, cv.CV_64FC3, objectInlierData);
-    imagePtsInlier = cv.matFromArray(inlierIndexes.length, 1, cv.CV_64FC2, imageInlierData);
-    try {
-      const okRefine = cv.solvePnP(
-        objectPtsInlier,
-        imagePtsInlier,
-        camera,
-        dist,
-        rvec,
-        tvec,
-        true,
-        cv.SOLVEPNP_ITERATIVE
-      );
-      if (!okRefine) {
-        return {
-          cost: Number.POSITIVE_INFINITY,
-          inlierCount: inlierIndexes.length,
-          rvec: [0, 0, 0],
-          tvec: [0, 0, 0],
-          rmse: Number.POSITIVE_INFINITY,
-        };
-      }
-      if (typeof cv.solvePnPRefineLM === "function") {
-        try {
-          cv.solvePnPRefineLM(objectPtsInlier, imagePtsInlier, camera, dist, rvec, tvec);
-        } catch {
-          // Optional refinement is best effort.
-        }
-      }
-    } catch {
-      return {
-        cost: Number.POSITIVE_INFINITY,
-        inlierCount: inlierIndexes.length,
-        rvec: [0, 0, 0],
-        tvec: [0, 0, 0],
-        rmse: Number.POSITIVE_INFINITY,
-      };
-    }
-
-    projected = new cv.Mat();
-    cv.projectPoints(objectPts, rvec, tvec, camera, dist, projected);
-    const projData = (projected.data64F as Float64Array | undefined) ?? new Float64Array();
-    const delta = 5.0;
-    let huberSum = 0;
-    let sqSum = 0;
-    let errCount = 0;
-    for (let i = 0; i < correspondences.length; i += 1) {
-      const px = Number(projData[i * 2]);
-      const py = Number(projData[i * 2 + 1]);
-      const dx = px - correspondences[i].image[0];
-      const dy = py - correspondences[i].image[1];
-      const err = Math.hypot(dx, dy);
-      huberSum += err <= delta ? 0.5 * err * err : delta * (err - 0.5 * delta);
-      sqSum += err * err;
-      errCount += 1;
-    }
-    const outlierPenalty = (pointCount - inlierIndexes.length) * delta * delta;
-    const cost = errCount > 0 ? huberSum / errCount + outlierPenalty : Number.POSITIVE_INFINITY;
-    const rmse = errCount > 0 ? Math.sqrt(sqSum / errCount) : Number.POSITIVE_INFINITY;
-
-    return {
-      cost,
-      inlierCount: inlierIndexes.length,
-      rvec: getVec3FromMat(rvec),
-      tvec: getVec3FromMat(tvec),
-      rmse,
-    };
-  } finally {
-    if (imagePtsInlier && typeof imagePtsInlier.delete === "function") {
-      imagePtsInlier.delete();
-    }
-    if (objectPtsInlier && typeof objectPtsInlier.delete === "function") {
-      objectPtsInlier.delete();
-    }
-    if (projected && typeof projected.delete === "function") {
-      projected.delete();
-    }
-    if (inliers && typeof inliers.delete === "function") {
-      inliers.delete();
-    }
-    if (tvec && typeof tvec.delete === "function") {
-      tvec.delete();
-    }
-    if (rvec && typeof rvec.delete === "function") {
-      rvec.delete();
-    }
-    if (dist && typeof dist.delete === "function") {
-      dist.delete();
-    }
-    if (camera && typeof camera.delete === "function") {
-      camera.delete();
-    }
-    if (imagePts && typeof imagePts.delete === "function") {
-      imagePts.delete();
-    }
-    if (objectPts && typeof objectPts.delete === "function") {
-      objectPts.delete();
-    }
-  }
-}
-
-function goldenSectionSearchWeb(
-  fn: (value: number) => number,
-  lo: number,
-  hi: number,
-  iterations = 48
-): { x: number; value: number } {
-  const phi = (1 + Math.sqrt(5)) * 0.5;
-  const invPhi = 1 / phi;
-  let x1 = hi - (hi - lo) * invPhi;
-  let x2 = lo + (hi - lo) * invPhi;
-  let f1 = fn(x1);
-  let f2 = fn(x2);
-  for (let i = 0; i < iterations; i += 1) {
-    if (f1 < f2) {
-      hi = x2;
-      x2 = x1;
-      f2 = f1;
-      x1 = hi - (hi - lo) * invPhi;
-      f1 = fn(x1);
-    } else {
-      lo = x1;
-      x1 = x2;
-      f1 = f2;
-      x2 = lo + (hi - lo) * invPhi;
-      f2 = fn(x2);
-    }
-  }
-  return f1 < f2 ? { x: x1, value: f1 } : { x: x2, value: f2 };
+): Array<{ image: [number, number]; world: [number, number, number] }> {
+  return buildPoseCorrespondencesFromStructureImpl(lines, vertices);
 }
 
 function wrapDegrees180(angleDeg: number): number {
-  return ((angleDeg + 180) % 360) - 180;
+  return Geometry.wrapDegrees180(angleDeg);
 }
 
-function poseToCameraWorldAndMinecraftAnglesWeb(
-  cv: any,
-  rvec: [number, number, number],
-  tvec: [number, number, number]
-): { camera: [number, number, number]; yaw: number; pitch: number } {
-  let rvecMat: any = null;
-  let rmat: any = null;
-  try {
-    rvecMat = cv.matFromArray(3, 1, cv.CV_64FC1, [rvec[0], rvec[1], rvec[2]]);
-    rmat = new cv.Mat();
-    cv.Rodrigues(rvecMat, rmat);
-    const r = (rmat.data64F as Float64Array | undefined) ?? new Float64Array();
-    const tx = tvec[0];
-    const ty = tvec[1];
-    const tz = tvec[2];
-    const camX = -(r[0] * tx + r[3] * ty + r[6] * tz);
-    const camY = -(r[1] * tx + r[4] * ty + r[7] * tz);
-    const camZ = -(r[2] * tx + r[5] * ty + r[8] * tz);
-    let fx = r[6];
-    let fy = r[7];
-    let fz = r[8];
-    const norm = Math.hypot(fx, fy, fz);
-    if (norm > 1e-12) {
-      fx /= norm;
-      fy /= norm;
-      fz /= norm;
-    }
-    const pitch = (Math.asin(Math.max(-1, Math.min(1, -fy))) * 180) / Math.PI;
-    const yaw = wrapDegrees180((Math.atan2(-fx, fz) * 180) / Math.PI);
-    return {
-      camera: [camX, camY, camZ],
-      yaw,
-      pitch,
-    };
-  } finally {
-    if (rmat && typeof rmat.delete === "function") {
-      rmat.delete();
-    }
-    if (rvecMat && typeof rvecMat.delete === "function") {
-      rvecMat.delete();
-    }
-  }
-}
-
-async function runWebPoseSolve(args: McvPoseSolveArgs): Promise<McvPoseSolveResult> {
-  const cv = await getWebMcvRuntime();
-  const width = Math.floor(Number(args.width));
-  const height = Math.floor(Number(args.height));
-  if (!Number.isFinite(width) || !Number.isFinite(height) || width <= 0 || height <= 0) {
-    throw new Error("width and height must be positive integers");
-  }
-  const lines = Array.isArray(args.lines) ? args.lines : [];
-  const vertices = Array.isArray(args.vertices) ? args.vertices : [];
-  const correspondences = buildPoseCorrespondencesFromStructure(lines, vertices);
-  if (correspondences.length < 4) {
-    throw new Error("Need at least 4 valid vertex correspondences with known world coordinates");
-  }
-
-  const initialVfovDeg =
-    isFiniteNumber(args.initial_vfov_deg) && args.initial_vfov_deg > 1 && args.initial_vfov_deg < 179
-      ? args.initial_vfov_deg
-      : 70;
-  const fInit = (height * 0.5) / Math.tan((initialVfovDeg * 0.5 * Math.PI) / 180);
-  const fMin = Math.max(20, fInit * 0.3);
-  const fMax = fInit * 3;
-
-  const cache = new Map<number, ReturnType<typeof evaluatePoseForFocalWeb>>();
-  const evalLogF = (logf: number): number => {
-    if (!cache.has(logf)) {
-      const focal = Math.exp(logf);
-      cache.set(logf, evaluatePoseForFocalWeb(cv, correspondences, width, height, focal));
-    }
-    return cache.get(logf)!.cost;
-  };
-
-  const sampleCount = 44;
-  const logs: number[] = [];
-  for (let i = 0; i < sampleCount; i += 1) {
-    logs.push(Math.log(fMin) + (Math.log(fMax) - Math.log(fMin)) * (i / (sampleCount - 1)));
-  }
-  const costs = logs.map((logf) => evalLogF(logf));
-  let bestIdx = 0;
-  for (let i = 1; i < costs.length; i += 1) {
-    if (costs[i] < costs[bestIdx]) {
-      bestIdx = i;
-    }
-  }
-  const loIdx = Math.max(0, bestIdx - 2);
-  const hiIdx = Math.min(logs.length - 1, bestIdx + 2);
-  let lo = logs[loIdx];
-  let hi = logs[hiIdx];
-  if (!(hi > lo)) {
-    lo = logs[0];
-    hi = logs[logs.length - 1];
-  }
-
-  const bestLog = goldenSectionSearchWeb(evalLogF, lo, hi, 32).x;
-  const bestFocal = Math.exp(bestLog);
-  const bestPose = evaluatePoseForFocalWeb(cv, correspondences, width, height, bestFocal);
-  if (!Number.isFinite(bestPose.cost)) {
-    throw new Error("Focal search failed to find a valid PnP solution");
-  }
-
-  const hfovDeg = (2 * Math.atan((width * 0.5) / bestFocal) * 180) / Math.PI;
-  const vfovDeg = (2 * Math.atan((height * 0.5) / bestFocal) * 180) / Math.PI;
-  const worldPose = poseToCameraWorldAndMinecraftAnglesWeb(cv, bestPose.rvec, bestPose.tvec);
-  const playerY = worldPose.camera[1] - 1.62;
-  const tpCommand = `/tp @s ${worldPose.camera[0].toFixed(6)} ${playerY.toFixed(6)} ${worldPose.camera[2].toFixed(6)} ${worldPose.yaw.toFixed(6)} ${worldPose.pitch.toFixed(6)}`;
-
-  return {
-    point_count: correspondences.length,
-    inlier_count: bestPose.inlierCount,
-    image_width: width,
-    image_height: height,
-    initial_vfov_deg: initialVfovDeg,
-    initial_focal_px: fInit,
-    optimized_focal_px: bestFocal,
-    optimized_hfov_deg: hfovDeg,
-    optimized_vfov_deg: vfovDeg,
-    reprojection_rmse_px: bestPose.rmse,
-    camera_position: {
-      x: worldPose.camera[0],
-      y: worldPose.camera[1],
-      z: worldPose.camera[2],
-    },
-    player_position: {
-      x: worldPose.camera[0],
-      y: playerY,
-      z: worldPose.camera[2],
-    },
-    rotation: {
-      yaw: worldPose.yaw,
-      pitch: worldPose.pitch,
-    },
-    tp_command: tpCommand,
-  };
+async function runImagePipeline(args: McvImagePipelineArgs): Promise<McvImagePipelineResult> {
+  return await mcvRuntime.runImagePipeline(args);
 }
 
 async function runPoseSolve(args: McvPoseSolveArgs): Promise<McvPoseSolveResult> {
-  if (__MCV_BACKEND__ === "web") {
-    return await runWebPoseSolve(args);
-  }
-  const response = await callMcvApi<McvPoseSolveResult>({
-    op: "cv.poseSolve",
-    args,
-  });
-  if (!response.ok) {
-    throw new Error(response.error.message || "Pose solve failed");
-  }
-  return response.data;
+  return await mcvRuntime.runPoseSolve(args);
 }
 
 async function callMcvApi<TData>(requestBody: McvRequest): Promise<McvResponse<TData>> {
-  if (__MCV_BACKEND__ === "web") {
-    if (requestBody.op !== "cv.opencvTest" && requestBody.op !== "cv.poseSolve") {
-      return {
-        ok: false,
-        error: {
-          code: "UNKNOWN_OP",
-          message: `Unsupported operation in web backend: ${requestBody.op}`,
-        },
-      };
-    }
-
-    try {
-      if (requestBody.op === "cv.poseSolve") {
-        const data = await runWebPoseSolve(requestBody.args as McvPoseSolveArgs);
-        return {
-          ok: true,
-          data,
-        } as McvResponse<TData>;
-      }
-      const cv = await getWebMcvRuntime();
-      const src = cv.matFromArray(1, 3, cv.CV_8UC3, [255, 0, 0, 0, 255, 0, 0, 0, 255]);
-      const gray = new cv.Mat();
-      cv.cvtColor(src, gray, cv.COLOR_RGB2GRAY);
-      const grayValues = Array.from(gray.data as Uint8Array).map((value) => Number(value));
-      const response = {
-        ok: true,
-        data: {
-          opencv_version: String((cv as any).VERSION ?? "opencv.js"),
-          gray_values: grayValues,
-          shape: [Number(gray.rows), Number(gray.cols)],
-          mean_gray:
-            grayValues.length > 0
-              ? grayValues.reduce((sum, value) => sum + value, 0) / grayValues.length
-              : 0,
-        },
-      } satisfies McvSuccess<McvOpencvTestResult>;
-      src.delete();
-      gray.delete();
-      return response as McvResponse<TData>;
-    } catch (error) {
-      return {
-        ok: false,
-        error: {
-          code: "WEB_BACKEND_ERROR",
-          message: "OpenCV.js call failed",
-          details: String(error),
-        },
-      };
-    }
-  }
-
-  try {
-    const response = await fetch("/api/mcv", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(requestBody),
-    });
-
-    if (!response.ok) {
-      return {
-        ok: false,
-        error: {
-          code: "HTTP_ERROR",
-          message: `HTTP ${response.status}`,
-        },
-      };
-    }
-
-    return (await response.json()) as McvResponse<TData>;
-  } catch (error) {
-    return {
-      ok: false,
-      error: {
-        code: "NETWORK_ERROR",
-        message: "Could not reach backend API",
-        details: String(error),
-      },
-    };
-  }
+  return await mcvRuntime.callMcvApi<TData>(requestBody);
 }
 
 async function fetchMediaApi(): Promise<Response> {
-  return fetch(__MCV_MEDIA_API_URL__);
+  return await mcvRuntime.fetchMediaApi();
 }
 
 function isMediaApiAvailable(): boolean {
-  return typeof __MCV_MEDIA_API_URL__ === "string" && __MCV_MEDIA_API_URL__.trim().length > 0;
+  return mcvRuntime.isMediaApiAvailable();
 }
 
 function isDataApiAvailable(): boolean {
-  return typeof __MCV_DATA_API_URL__ === "string" && __MCV_DATA_API_URL__.trim().length > 0;
+  return mcvRuntime.isDataApiAvailable();
 }
-
 function installGlobalApi(): void {
   window.MCV_API = {
     media: {
@@ -2256,120 +1393,20 @@ function showViewerFullImage(src: string, alt: string): void {
   window.setTimeout(scrollViewerFullImageIntoView, 60);
 }
 
-function createCropResultSvgBase(width: number, height: number, imageDataUrl: string): SVGSVGElement {
-  const svgNs = "http://www.w3.org/2000/svg";
-  const svg = document.createElementNS(svgNs, "svg");
-  svg.classList.add("viewer-crop-result-svg");
-  svg.setAttribute("viewBox", `0 0 ${width} ${height}`);
-  svg.setAttribute("preserveAspectRatio", "xMidYMid meet");
-  svg.setAttribute("width", String(width));
-  svg.setAttribute("height", String(height));
 
-  const imageNode = document.createElementNS(svgNs, "image");
-  imageNode.setAttribute("href", imageDataUrl);
-  imageNode.setAttribute("x", "0");
-  imageNode.setAttribute("y", "0");
-  imageNode.setAttribute("width", String(width));
-  imageNode.setAttribute("height", String(height));
-  imageNode.setAttribute("preserveAspectRatio", "none");
-  const sceneGroup = document.createElementNS(svgNs, "g");
-  sceneGroup.setAttribute("data-role", "viewer-scene");
-  sceneGroup.appendChild(imageNode);
-  svg.appendChild(sceneGroup);
-  return svg;
-}
 
-function appendSvgLine(
-  parent: SVGElement,
-  segment: McvLineSegment,
-  stroke: string,
-  strokeWidth = 1,
-  opacity = 1,
-  markerEndId?: string
-): void {
-  const svgNs = "http://www.w3.org/2000/svg";
-  const line = document.createElementNS(svgNs, "line");
-  line.setAttribute("x1", String(segment[0]));
-  line.setAttribute("y1", String(segment[1]));
-  line.setAttribute("x2", String(segment[2]));
-  line.setAttribute("y2", String(segment[3]));
-  line.setAttribute("stroke", stroke);
-  line.setAttribute("stroke-width", String(strokeWidth));
-  line.setAttribute("stroke-linecap", "round");
-  line.setAttribute("vector-effect", "non-scaling-stroke");
-  line.setAttribute("opacity", String(opacity));
-  if (markerEndId) {
-    line.setAttribute("marker-end", `url(#${markerEndId})`);
-  }
-  parent.appendChild(line);
-}
 
-function appendSvgLineLabel(
-  parent: SVGElement,
-  segment: McvLineSegment,
-  textValue: number | undefined,
-  color: string
-): void {
-  if (textValue === undefined || textValue <= 0) {
-    return;
-  }
-  const svgNs = "http://www.w3.org/2000/svg";
-  const text = document.createElementNS(svgNs, "text");
-  const midX = (segment[0] + segment[2]) * 0.5;
-  const midY = (segment[1] + segment[3]) * 0.5;
-  text.setAttribute("x", String(midX + 4));
-  text.setAttribute("y", String(midY - 4));
-  text.setAttribute("fill", color);
-  text.setAttribute("stroke", "#111821");
-  text.setAttribute("stroke-width", "0.6");
-  text.setAttribute("paint-order", "stroke fill");
-  text.setAttribute("font-size", "8");
-  text.setAttribute("font-weight", "700");
-  text.setAttribute("font-family", "Segoe UI, Tahoma, sans-serif");
-  text.setAttribute("vector-effect", "non-scaling-stroke");
-  text.textContent = String(textValue);
-  parent.appendChild(text);
-}
 
-function appendSvgPointDot(
-  parent: SVGElement,
-  point: ManualPoint,
-  color: string,
-  radius: number
-): void {
-  const svgNs = "http://www.w3.org/2000/svg";
-  const circle = document.createElementNS(svgNs, "circle");
-  circle.setAttribute("cx", String(point.x));
-  circle.setAttribute("cy", String(point.y));
-  circle.setAttribute("r", String(radius));
-  circle.setAttribute("fill", color);
-  circle.setAttribute("stroke", "#111821");
-  circle.setAttribute("stroke-width", "0.8");
-  circle.setAttribute("vector-effect", "non-scaling-stroke");
-  parent.appendChild(circle);
-}
 
-function appendSvgAnchorLabel(
-  parent: SVGElement,
-  point: ManualPoint,
-  label: string,
-  color: string
-): void {
-  const svgNs = "http://www.w3.org/2000/svg";
-  const text = document.createElementNS(svgNs, "text");
-  text.setAttribute("x", String(point.x + 6));
-  text.setAttribute("y", String(point.y - 6));
-  text.setAttribute("fill", color);
-  text.setAttribute("stroke", "#111821");
-  text.setAttribute("stroke-width", "0.9");
-  text.setAttribute("paint-order", "stroke fill");
-  text.setAttribute("font-size", "9");
-  text.setAttribute("font-weight", "700");
-  text.setAttribute("font-family", "Segoe UI, Tahoma, sans-serif");
-  text.setAttribute("vector-effect", "non-scaling-stroke");
-  text.textContent = label;
-  parent.appendChild(text);
-}
+
+
+
+
+
+
+
+
+
 
 function adjustDraftEdgeLength(delta: number): void {
   if (!manualDraftLine) {
@@ -2392,35 +1429,17 @@ function adjustDraftEdgeLength(delta: number): void {
   renderCropResultFromCache();
 }
 
-function getLineSegmentForLine(line: { from: ManualPoint; to: ManualPoint }): McvLineSegment {
-  return [line.from.x, line.from.y, line.to.x, line.to.y];
-}
 
-function getLineSegmentForDraft(draft: DraftManualLine): McvLineSegment {
-  const from = draft.flipped ? draft.to : draft.from;
-  const to = draft.flipped ? draft.from : draft.to;
-  return [from.x, from.y, to.x, to.y];
-}
 
-function getAxisColor(axis: ManualAxis): string {
-  if (axis === "x") {
-    return "#ff4d4d";
-  }
-  if (axis === "y") {
-    return "#5dff74";
-  }
-  return "#4da1ff";
-}
 
-function getAxisLightColor(axis: ManualAxis): string {
-  if (axis === "x") {
-    return "#ff9a9a";
-  }
-  if (axis === "y") {
-    return "#a6ffb3";
-  }
-  return "#9ec7ff";
-}
+
+
+
+
+
+
+
+
 
 function formatVertexSolveCoordValue(value: number | undefined): string {
   if (value === undefined) {
@@ -2855,17 +1874,8 @@ function getAnchorLinkedLineIndexes(anchor: StructureAnchor): Set<number> {
   return indexes;
 }
 
-function areSortedArraysEqual(first: number[], second: number[]): boolean {
-  if (first.length !== second.length) {
-    return false;
-  }
-  for (let i = 0; i < first.length; i += 1) {
-    if (first[i] !== second[i]) {
-      return false;
-    }
-  }
-  return true;
-}
+
+
 
 function findAnchorByLinks(from: number[], to: number[]): number {
   const sortedFrom = Array.from(new Set(from)).sort((a, b) => a - b);
@@ -2873,8 +1883,8 @@ function findAnchorByLinks(from: number[], to: number[]): number {
   for (let index = 0; index < MCV_DATA.structure.anchors.length; index += 1) {
     const anchor = MCV_DATA.structure.anchors[index];
     if (
-      areSortedArraysEqual(sortedFrom, anchor.from) &&
-      areSortedArraysEqual(sortedTo, anchor.to)
+      Geometry.areSortedArraysEqual(sortedFrom, anchor.from) &&
+      Geometry.areSortedArraysEqual(sortedTo, anchor.to)
     ) {
       return index;
     }
@@ -2938,7 +1948,7 @@ function updateAnchorHoverFromClient(clientX: number, clientY: number): void {
   }
   const changed =
     !manualAnchorHoveredVertex ||
-    !areSortedArraysEqual(manualAnchorHoveredVertex.endpointIds, next.endpointIds);
+    !Geometry.areSortedArraysEqual(manualAnchorHoveredVertex.endpointIds, next.endpointIds);
   if (changed) {
     manualAnchorHoveredVertex = next;
     renderCropResultFromCache();
@@ -2969,14 +1979,14 @@ function purgeGeneratedVerticesKeepingAnchors(): void {
     if (vertex) {
       retainedVertices.push({
         ...vertex,
-        from: normalizeLineRefs(vertex.from),
-        to: normalizeLineRefs(vertex.to),
+        from: Geometry.normalizeLineRefs(vertex.from),
+        to: Geometry.normalizeLineRefs(vertex.to),
         anchor: anchorIndex,
       });
     } else {
       retainedVertices.push({
-        from: normalizeLineRefs(anchor.from),
-        to: normalizeLineRefs(anchor.to),
+        from: Geometry.normalizeLineRefs(anchor.from),
+        to: Geometry.normalizeLineRefs(anchor.to),
         ...(anchor.x !== undefined ? { x: anchor.x } : {}),
         ...(anchor.y !== undefined ? { y: anchor.y } : {}),
         ...(anchor.z !== undefined ? { z: anchor.z } : {}),
@@ -3044,7 +2054,7 @@ function findTopologyVertexIndexForAnchor(
     return -1;
   }
   for (let index = 0; index < topologyVertices.length; index += 1) {
-    if (areSortedArraysEqual(endpointIds, topologyVertices[index].endpointIds)) {
+    if (Geometry.areSortedArraysEqual(endpointIds, topologyVertices[index].endpointIds)) {
       return index;
     }
   }
@@ -3191,8 +2201,8 @@ function runVertexSolveAndBuildData(): VertexSolveRenderData {
     const topo = topoIndex >= 0 ? topologyVertices[topoIndex] : null;
     const coord = topoIndex >= 0 ? coords[topoIndex] : {};
     const nextVertex: StructureVertexData = {
-      from: normalizeLineRefs(topo ? topo.endpointIds.filter((id) => id % 2 === 0).map((id) => Math.floor(id / 2)) : anchor.from),
-      to: normalizeLineRefs(topo ? topo.endpointIds.filter((id) => id % 2 === 1).map((id) => Math.floor(id / 2)) : anchor.to),
+      from: Geometry.normalizeLineRefs(topo ? topo.endpointIds.filter((id) => id % 2 === 0).map((id) => Math.floor(id / 2)) : anchor.from),
+      to: Geometry.normalizeLineRefs(topo ? topo.endpointIds.filter((id) => id % 2 === 1).map((id) => Math.floor(id / 2)) : anchor.to),
       anchor: anchorIndex,
       ...(coord.x !== undefined ? { x: coord.x } : anchor.x !== undefined ? { x: anchor.x } : {}),
       ...(coord.y !== undefined ? { y: coord.y } : anchor.y !== undefined ? { y: anchor.y } : {}),
@@ -3226,8 +2236,8 @@ function runVertexSolveAndBuildData(): VertexSolveRenderData {
     }
     const coord = coords[topoIndex];
     newVertices.push({
-      from: normalizeLineRefs(topo.endpointIds.filter((id) => id % 2 === 0).map((id) => Math.floor(id / 2))),
-      to: normalizeLineRefs(topo.endpointIds.filter((id) => id % 2 === 1).map((id) => Math.floor(id / 2))),
+      from: Geometry.normalizeLineRefs(topo.endpointIds.filter((id) => id % 2 === 0).map((id) => Math.floor(id / 2))),
+      to: Geometry.normalizeLineRefs(topo.endpointIds.filter((id) => id % 2 === 1).map((id) => Math.floor(id / 2))),
       ...(coord.x !== undefined ? { x: coord.x } : {}),
       ...(coord.y !== undefined ? { y: coord.y } : {}),
       ...(coord.z !== undefined ? { z: coord.z } : {}),
@@ -3252,22 +2262,8 @@ function getCurrentLinesForDisplay(): Array<ManualAnnotation | StructureLine> {
   return renderAnnotationPreviewHeld ? MCV_DATA.annotations : MCV_DATA.structure.lines;
 }
 
-function getDistancePointToSegment(point: ManualPoint, segment: McvLineSegment): number {
-  const x1 = segment[0];
-  const y1 = segment[1];
-  const x2 = segment[2];
-  const y2 = segment[3];
-  const dx = x2 - x1;
-  const dy = y2 - y1;
-  const lenSq = dx * dx + dy * dy;
-  if (lenSq < 1e-9) {
-    return Math.hypot(point.x - x1, point.y - y1);
-  }
-  const t = Math.max(0, Math.min(1, ((point.x - x1) * dx + (point.y - y1) * dy) / lenSq));
-  const projX = x1 + t * dx;
-  const projY = y1 + t * dy;
-  return Math.hypot(point.x - projX, point.y - projY);
-}
+
+
 
 function findClosestDisplayedLineIndex(point: ManualPoint): number {
   const lines = getCurrentLinesForDisplay();
@@ -3277,7 +2273,7 @@ function findClosestDisplayedLineIndex(point: ManualPoint): number {
   let bestIndex = -1;
   let bestDistance = Number.POSITIVE_INFINITY;
   lines.forEach((line, index) => {
-    const distance = getDistancePointToSegment(point, getLineSegmentForLine(line));
+    const distance = Geometry.getDistancePointToSegment(point, SvgUtils.getLineSegmentForLine(line));
     if (distance < bestDistance) {
       bestDistance = distance;
       bestIndex = index;
@@ -3369,8 +2365,8 @@ function swapAnchorEndpointForLine(lineIndex: number): void {
     if (hasTo) {
       vertex.from.push(lineIndex);
     }
-    vertex.from = normalizeLineRefs(vertex.from);
-    vertex.to = normalizeLineRefs(vertex.to);
+    vertex.from = Geometry.normalizeLineRefs(vertex.from);
+    vertex.to = Geometry.normalizeLineRefs(vertex.to);
   });
 }
 
@@ -3510,30 +2506,11 @@ function removeLineAtIndex(lineIndex: number): void {
   renderCropResultFromCache();
 }
 
-function getAxisMarkerId(axis: ManualAxis): string {
-  return `mcv-arrow-${axis}`;
-}
 
-function appendAxisMarkers(svg: SVGSVGElement): void {
-  const svgNs = "http://www.w3.org/2000/svg";
-  const defs = document.createElementNS(svgNs, "defs");
-  (["x", "y", "z"] as ManualAxis[]).forEach((axis) => {
-    const marker = document.createElementNS(svgNs, "marker");
-    marker.setAttribute("id", getAxisMarkerId(axis));
-    marker.setAttribute("markerWidth", "8");
-    marker.setAttribute("markerHeight", "8");
-    marker.setAttribute("refX", "7");
-    marker.setAttribute("refY", "4");
-    marker.setAttribute("orient", "auto");
-    marker.setAttribute("markerUnits", "strokeWidth");
-    const path = document.createElementNS(svgNs, "path");
-    path.setAttribute("d", "M 0 0 L 8 4 L 0 8 z");
-    path.setAttribute("fill", getAxisColor(axis));
-    marker.appendChild(path);
-    defs.appendChild(marker);
-  });
-  svg.appendChild(defs);
-}
+
+
+
+
 
 function getCropViewPointFromClient(
   clientX: number,
@@ -3605,7 +2582,7 @@ function annotationsWouldLink(first: ManualAnnotation, second: ManualAnnotation,
 function getDraftPotentialLinkIndexes(draft: DraftManualLine): Set<number> {
   const potential = new Set<number>();
   const draftAnnotation = getDraftAsAnnotation(draft);
-  const threshold = computeStructureLinkThreshold([...MCV_DATA.annotations, draftAnnotation]);
+  const threshold = Geometry.computeStructureLinkThreshold([...MCV_DATA.annotations, draftAnnotation]);
   for (let index = 0; index < MCV_DATA.annotations.length; index += 1) {
     if (annotationsWouldLink(draftAnnotation, MCV_DATA.annotations[index], threshold)) {
       potential.add(index);
@@ -3619,8 +2596,8 @@ function createManualModeCropResultSvg(
   height: number,
   colorDataUrl: string
 ): SVGSVGElement {
-  const svg = createCropResultSvgBase(width, height, colorDataUrl);
-  appendAxisMarkers(svg);
+  const svg = SvgUtils.createCropResultSvgBase(width, height, colorDataUrl);
+  SvgUtils.appendAxisMarkers(svg);
   const sceneGroup = svg.querySelector('[data-role="viewer-scene"]') as SVGGElement | null;
   if (!sceneGroup) {
     return svg;
@@ -3661,35 +2638,35 @@ function createManualModeCropResultSvg(
           ? "#5dff74"
           : "#ffffff"
         : (anchorMode && anchorLightIndexes.has(index)) || editHighlighted
-        ? getAxisLightColor(line.axis)
+        ? SvgUtils.getAxisLightColor(line.axis)
         : potentialLinkIndexes.has(index)
-          ? getAxisLightColor(line.axis)
-          : getAxisColor(line.axis);
-    const segment = getLineSegmentForLine(line);
-    appendSvgLine(
+          ? SvgUtils.getAxisLightColor(line.axis)
+          : SvgUtils.getAxisColor(line.axis);
+    const segment = SvgUtils.getLineSegmentForLine(line);
+    SvgUtils.appendSvgLine(
       sceneGroup,
       segment,
       axisColor,
       2,
       1,
-      anchorMode || vertexSolveMode ? undefined : getAxisMarkerId(line.axis)
+      anchorMode || vertexSolveMode ? undefined : SvgUtils.getAxisMarkerId(line.axis)
     );
     if (!anchorMode && !vertexSolveMode) {
-      appendSvgLineLabel(sceneGroup, segment, line.length, axisColor);
+      SvgUtils.appendSvgLineLabel(sceneGroup, segment, line.length, axisColor);
     }
   });
   if (!anchorMode && !vertexSolveMode && manualDraftLine) {
-    const draftSegment = getLineSegmentForDraft(manualDraftLine);
-    const axisColor = getAxisColor(manualDraftLine.axis);
-    appendSvgLine(
+    const draftSegment = SvgUtils.getLineSegmentForDraft(manualDraftLine);
+    const axisColor = SvgUtils.getAxisColor(manualDraftLine.axis);
+    SvgUtils.appendSvgLine(
       sceneGroup,
       draftSegment,
       axisColor,
       2,
       0.95,
-      getAxisMarkerId(manualDraftLine.axis)
+      SvgUtils.getAxisMarkerId(manualDraftLine.axis)
     );
-    appendSvgLineLabel(sceneGroup, draftSegment, manualDraftLine.length, axisColor);
+    SvgUtils.appendSvgLineLabel(sceneGroup, draftSegment, manualDraftLine.length, axisColor);
   }
 
   if (anchorMode) {
@@ -3699,8 +2676,8 @@ function createManualModeCropResultSvg(
         return;
       }
       const selected = manualAnchorSelectedIndex === index;
-      appendSvgPointDot(sceneGroup, point, selected ? "#5ca8ff" : "#ffffff", 2.2);
-      appendSvgAnchorLabel(
+      SvgUtils.appendSvgPointDot(sceneGroup, point, selected ? "#5ca8ff" : "#ffffff", 2.2);
+      SvgUtils.appendSvgAnchorLabel(
         sceneGroup,
         point,
         getAnchorLabel(anchor, index),
@@ -3708,26 +2685,26 @@ function createManualModeCropResultSvg(
       );
     });
     if (manualAnchorHoveredVertex) {
-      appendSvgPointDot(sceneGroup, manualAnchorHoveredVertex.point, "#ffe46b", 2.8);
+      SvgUtils.appendSvgPointDot(sceneGroup, manualAnchorHoveredVertex.point, "#ffe46b", 2.8);
     }
   }
   if (vertexSolveMode && solveData) {
     MCV_DATA.structure.anchors.forEach((anchor) => {
       const point = getAnchorPoint(anchor);
       if (point) {
-        appendSvgPointDot(sceneGroup, point, "#5dff74", 2.6);
+        SvgUtils.appendSvgPointDot(sceneGroup, point, "#5dff74", 2.6);
       }
     });
     solveData.generatedVertexIndexes.forEach((vertexIndex) => {
       const vertex = solveData.topologyVertices[vertexIndex];
       if (vertex) {
-        appendSvgPointDot(sceneGroup, vertex.point, "#5dff74", 2.4);
+        SvgUtils.appendSvgPointDot(sceneGroup, vertex.point, "#5dff74", 2.4);
       }
     });
     if (solveData.conflictVertexIndex !== null) {
       const conflict = solveData.topologyVertices[solveData.conflictVertexIndex];
       if (conflict) {
-        appendSvgPointDot(sceneGroup, conflict.point, "#ff4d4d", 3.2);
+        SvgUtils.appendSvgPointDot(sceneGroup, conflict.point, "#ff4d4d", 3.2);
       }
     }
     if (
@@ -3746,7 +2723,7 @@ function createManualModeCropResultSvg(
       ) {
         labelText = `${formatVertexSolveCoordTuple(solveData.conflictCoordPair.existing)} vs ${formatVertexSolveCoordTuple(solveData.conflictCoordPair.inferred)}`;
       }
-      appendSvgAnchorLabel(sceneGroup, hoveredPoint, labelText, "#ffe46b");
+      SvgUtils.appendSvgAnchorLabel(sceneGroup, hoveredPoint, labelText, "#ffe46b");
     }
   }
 
@@ -4117,165 +3094,35 @@ function configureExternalLink(node: HTMLAnchorElement, url: string, label: stri
   });
 }
 
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
-}
 
-function normalizeVideos(value: unknown): Record<string, MediaVideoEntry> {
-  if (!isRecord(value)) {
-    return {};
-  }
-  const output: Record<string, MediaVideoEntry> = {};
-  for (const [id, entry] of Object.entries(value)) {
-    if (!isRecord(entry)) {
-      continue;
-    }
-    const name = typeof entry.name === "string" ? entry.name.trim() : "";
-    const url = typeof entry.url === "string" ? entry.url.trim() : "";
-    if (!name || !url) {
-      continue;
-    }
-    const youtubeId =
-      typeof entry.youtube_id === "string" && entry.youtube_id.trim()
-        ? entry.youtube_id.trim()
-        : undefined;
-    output[id] = {
-      name,
-      url,
-      ...(youtubeId ? { youtube_id: youtubeId } : {}),
-    };
-  }
-  return output;
-}
 
-function normalizeImages(value: unknown): Record<string, MediaImageEntry> {
-  if (!isRecord(value)) {
-    return {};
-  }
-  const output: Record<string, MediaImageEntry> = {};
-  for (const [id, entry] of Object.entries(value)) {
-    if (!isRecord(entry)) {
-      continue;
-    }
-    const name = typeof entry.name === "string" ? entry.name.trim() : "";
-    const url = typeof entry.url === "string" ? entry.url.trim() : "";
-    if (!name || !url) {
-      continue;
-    }
-    output[id] = { name, url };
-  }
-  return output;
-}
 
-function parseMediaLibrary(payload: unknown): MediaLibrary | null {
-  if (!isRecord(payload)) {
-    return null;
-  }
-  return {
-    videos: normalizeVideos(payload.videos),
-    images: normalizeImages(payload.images),
-  };
-}
 
-function parseUrlOrNull(value: string): URL | null {
-  try {
-    return new URL(value);
-  } catch {
-    return null;
-  }
-}
 
-function isYoutubeUrl(url: URL): boolean {
-  const host = url.hostname.toLowerCase();
-  return (
-    host === "youtu.be" ||
-    host === "www.youtu.be" ||
-    host.endsWith("youtube.com")
-  );
-}
 
-function extractYoutubeId(url: URL): string | null {
-  const host = url.hostname.toLowerCase();
-  const pathParts = url.pathname.split("/").filter(Boolean);
-  let candidate = "";
 
-  if (host === "youtu.be" || host === "www.youtu.be") {
-    candidate = pathParts[0] || "";
-  } else if (host.endsWith("youtube.com")) {
-    if (url.pathname === "/watch") {
-      candidate = url.searchParams.get("v") || "";
-    } else if (pathParts.length >= 2 && ["shorts", "embed", "live", "v"].includes(pathParts[0])) {
-      candidate = pathParts[1] || "";
-    }
-  }
 
-  const trimmed = candidate.trim();
-  if (!trimmed) {
-    return null;
-  }
-  return /^[A-Za-z0-9_-]{6,}$/.test(trimmed) ? trimmed : null;
-}
 
-function parseTimestampSeconds(raw: string): number | null {
-  const value = raw.trim();
-  if (!value) {
-    return null;
-  }
-  if (/^\d+(\.\d+)?$/.test(value)) {
-    return Number(value);
-  }
-  if (value.includes(":")) {
-    const parts = value.split(":").map((part) => part.trim());
-    if (parts.some((part) => !part)) {
-      return null;
-    }
-    if (parts.length < 2 || parts.length > 3) {
-      return null;
-    }
-    const numeric = parts.map((part) => Number(part));
-    if (numeric.some((part) => Number.isNaN(part) || part < 0)) {
-      return null;
-    }
-    if (parts.length === 2) {
-      const [minutes, seconds] = numeric;
-      return minutes * 60 + seconds;
-    }
-    const [hours, minutes, seconds] = numeric;
-    return hours * 3600 + minutes * 60 + seconds;
-  }
-  const match = value.match(/^(?:(\d+)h)?(?:(\d+)m)?(?:(\d+(?:\.\d+)?)s?)?$/i);
-  if (!match) {
-    return null;
-  }
-  const hours = match[1] ? Number(match[1]) : 0;
-  const minutes = match[2] ? Number(match[2]) : 0;
-  const seconds = match[3] ? Number(match[3]) : 0;
-  const total = hours * 3600 + minutes * 60 + seconds;
-  return total > 0 ? total : null;
-}
 
-function formatTimestamp(seconds: number): string {
-  const wholeSeconds = Math.max(0, Math.floor(seconds));
-  const hrs = Math.floor(wholeSeconds / 3600);
-  const mins = Math.floor((wholeSeconds % 3600) / 60);
-  const secs = wholeSeconds % 60;
-  if (hrs > 0) {
-    return `${hrs}:${String(mins).padStart(2, "0")}:${String(secs).padStart(2, "0")}`;
-  }
-  return `${mins}:${String(secs).padStart(2, "0")}`;
-}
 
-function extractYoutubeTimestampLabel(url: URL): string | undefined {
-  const raw = (url.searchParams.get("t") || "").trim();
-  if (!raw) {
-    return undefined;
-  }
-  const seconds = parseTimestampSeconds(raw);
-  if (seconds === null) {
-    return raw;
-  }
-  return formatTimestamp(seconds);
-}
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 function findVideoByYoutubeId(youtubeId: string): { id: string; item: MediaVideoEntry } | null {
   for (const [id, item] of Object.entries(mediaLibrary.videos)) {
@@ -4382,7 +3229,7 @@ function resolveVideoViewerFromSource(source: McvDataSource): ViewerMedia | null
       };
     }
   }
-  const normalizedSourceUrl = normalizePossibleUrl(source.url);
+  const normalizedSourceUrl = MediaUtils.normalizePossibleUrl(source.url);
   if (normalizedSourceUrl) {
     const byUrl = findMediaByNormalizedUrl(normalizedSourceUrl);
     if (byUrl && byUrl.kind === "video") {
@@ -4471,7 +3318,7 @@ function buildLaunchSeekInfo(intent: LaunchSelectionIntent): {
     return {};
   }
 
-  const parsedT = hasT ? parseTimestampSeconds(intent.tRaw) : 0;
+  const parsedT = hasT ? MediaUtils.parseTimestampSeconds(intent.tRaw) : 0;
   if (parsedT === null) {
     return {};
   }
@@ -4488,7 +3335,7 @@ function buildLaunchSeekInfo(intent: LaunchSelectionIntent): {
   const initialSeekSeconds = Math.max(0, parsedT) + frame / frameBase;
   const displayFrame = frame % frameBase;
   const displaySeconds = Math.max(0, Math.floor(parsedT + Math.floor(frame / frameBase)));
-  const timestampLabel = `${formatTimestamp(displaySeconds)}|${displayFrame}`;
+  const timestampLabel = `${MediaUtils.formatTimestamp(displaySeconds)}|${displayFrame}`;
   return { initialSeekSeconds, timestampLabel };
 }
 
@@ -4546,7 +3393,7 @@ function findMediaByNormalizedUrl(normalizedUrl: string): ViewerMedia | null {
         ? Object.entries(mediaLibrary.videos)
         : Object.entries(mediaLibrary.images);
     for (const [id, item] of entries) {
-      const itemUrl = normalizePossibleUrl(item.url);
+      const itemUrl = MediaUtils.normalizePossibleUrl(item.url);
       if (itemUrl && itemUrl === normalizedUrl) {
         return {
           tab,
@@ -4580,40 +3427,25 @@ function setTabButtonState(): void {
   uploadButton.classList.toggle("active", isUpload);
 }
 
-function normalizeSearchToken(value: string): string {
-  return value.trim().toLowerCase();
-}
 
-function normalizeUrlForMatch(url: URL): string {
-  const clone = new URL(url.toString());
-  clone.hash = "";
-  clone.searchParams.delete("t");
-  return clone.toString();
-}
 
-function parseSearchIntent(rawQuery: string): SearchIntent {
-  const query = rawQuery.trim();
-  const parsedUrl = parseUrlOrNull(query);
-  const youtubeId = parsedUrl && isYoutubeUrl(parsedUrl) ? extractYoutubeId(parsedUrl) : null;
-  const normalizedUrl = parsedUrl ? normalizeUrlForMatch(parsedUrl) : null;
-  return { query, parsedUrl, youtubeId, normalizedUrl };
-}
 
-function normalizePossibleUrl(value: string): string | null {
-  const parsed = parseUrlOrNull(value);
-  if (!parsed) {
-    return null;
-  }
-  return normalizeUrlForMatch(parsed);
-}
+
+
+
+
+
+
+
+
 
 function matchesMediaSearch(id: string, item: MediaVideoEntry | MediaImageEntry, tab: MediaTab): boolean {
-  const query = normalizeSearchToken(mediaSearchQuery);
+  const query = MediaUtils.normalizeSearchToken(mediaSearchQuery);
   if (!query) {
     return true;
   }
 
-  const intent = parseSearchIntent(mediaSearchQuery);
+  const intent = MediaUtils.parseSearchIntent(mediaSearchQuery);
 
   if (intent.youtubeId && tab === "videos") {
     const videoItem = item as MediaVideoEntry;
@@ -4623,11 +3455,11 @@ function matchesMediaSearch(id: string, item: MediaVideoEntry | MediaImageEntry,
   }
 
   if (intent.normalizedUrl) {
-    const itemNormalizedUrl = normalizePossibleUrl(item.url);
+    const itemNormalizedUrl = MediaUtils.normalizePossibleUrl(item.url);
     if (itemNormalizedUrl && itemNormalizedUrl === intent.normalizedUrl) {
       return true;
     }
-    if (normalizeSearchToken(item.url).includes(query) || query.includes(normalizeSearchToken(item.url))) {
+    if (MediaUtils.normalizeSearchToken(item.url).includes(query) || query.includes(MediaUtils.normalizeSearchToken(item.url))) {
       return true;
     }
   }
@@ -4639,104 +3471,32 @@ function matchesMediaSearch(id: string, item: MediaVideoEntry | MediaImageEntry,
       haystack.push(videoItem.youtube_id);
     }
   }
-  return haystack.some((value) => normalizeSearchToken(value).includes(query));
+  return haystack.some((value) => MediaUtils.normalizeSearchToken(value).includes(query));
 }
 
-function inferMediaKindFromUrl(url: URL): MediaKind {
-  const pathname = url.pathname.toLowerCase();
-  if (/\.(png|jpg|jpeg|gif|webp|bmp|svg|avif)$/.test(pathname)) {
-    return "image";
-  }
-  if (/\.(mp4|webm|mov|m4v|ogv|mkv)$/.test(pathname)) {
-    return "video";
-  }
-  return "video";
-}
 
-function inferMediaKindFromFile(file: File): MediaKind {
-  if (file.type.startsWith("image/")) {
-    return "image";
-  }
-  if (file.type.startsWith("video/")) {
-    return "video";
-  }
-  const fakeUrl = parseUrlOrNull(`https://local.invalid/${encodeURIComponent(file.name)}`);
-  return fakeUrl ? inferMediaKindFromUrl(fakeUrl) : "video";
-}
 
-function isSvgFile(file: File): boolean {
-  const name = file.name.toLowerCase();
-  return file.type === "image/svg+xml" || name.endsWith(".svg");
-}
 
-function readFileAsText(file: File): Promise<string> {
-  return new Promise((resolve, reject) => {
-    const reader = new FileReader();
-    reader.onerror = () => reject(new Error("Failed to read file text"));
-    reader.onload = () => resolve(typeof reader.result === "string" ? reader.result : "");
-    reader.readAsText(file);
-  });
-}
 
-function readBlobAsDataUrl(blob: Blob): Promise<string> {
-  return new Promise((resolve, reject) => {
-    const reader = new FileReader();
-    reader.onerror = () => reject(new Error("Failed to read blob"));
-    reader.onload = () => resolve(typeof reader.result === "string" ? reader.result : "");
-    reader.readAsDataURL(blob);
-  });
-}
 
-async function ensureEmbeddedImageDataUrl(source: string): Promise<string> {
-  if (source.startsWith("data:")) {
-    return source;
-  }
-  if (source.startsWith("blob:")) {
-    const response = await fetch(source);
-    if (!response.ok) {
-      throw new Error(`Failed to fetch image blob: ${response.status}`);
-    }
-    const blob = await response.blob();
-    return await readBlobAsDataUrl(blob);
-  }
-  const response = await fetch(source, { mode: "cors" });
-  if (!response.ok) {
-    throw new Error(`Failed to fetch image source: ${response.status}`);
-  }
-  return await readBlobAsDataUrl(await response.blob());
-}
 
-function createSvgLayer(
-  svg: SVGSVGElement,
-  label: string,
-  visible: boolean
-): SVGGElement {
-  const svgNs = "http://www.w3.org/2000/svg";
-  const g = document.createElementNS(svgNs, "g");
-  g.setAttribute("inkscape:groupmode", "layer");
-  g.setAttribute("inkscape:label", label);
-  if (!visible) {
-    g.setAttribute("style", "display:none");
-  }
-  svg.appendChild(g);
-  return g;
-}
 
-function renderLinesToLayer(
-  layer: SVGGElement,
-  lines: Array<ManualAnnotation | StructureLine>,
-  includeArrows: boolean,
-  includeLengths: boolean
-): void {
-  lines.forEach((line) => {
-    const color = getAxisColor(line.axis);
-    const segment = getLineSegmentForLine(line);
-    appendSvgLine(layer, segment, color, 2, 1, includeArrows ? getAxisMarkerId(line.axis) : undefined);
-    if (includeLengths) {
-      appendSvgLineLabel(layer, segment, line.length, color);
-    }
-  });
-}
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 function getVertexDotPoint(vertex: StructureVertexData): ManualPoint | null {
   const endpointIds = [
@@ -4764,212 +3524,17 @@ function getVertexDotPoint(vertex: StructureVertexData): ManualPoint | null {
   return { x: sumX / count, y: sumY / count };
 }
 
-function normalizeImportedAxis(value: unknown): ManualAxis | null {
-  return value === "x" || value === "y" || value === "z" ? value : null;
-}
 
-function normalizeImportedSource(value: unknown): McvDataSource | undefined {
-  if (typeof value !== "object" || value === null) {
-    return undefined;
-  }
-  const item = value as Record<string, unknown>;
-  if (item.type === "video" && typeof item.filename === "string") {
-    const seconds =
-      typeof item.seconds === "number" && Number.isFinite(item.seconds) && item.seconds >= 0
-        ? Math.floor(item.seconds)
-        : 0;
-    const frames =
-      typeof item.frames === "number" && Number.isFinite(item.frames) && item.frames >= 0
-        ? Math.floor(item.frames)
-        : 0;
-    return {
-      type: "video",
-      filename: item.filename,
-      seconds,
-      frames,
-    };
-  }
-  const type = item.type;
-  const id = item.id;
-  const name = item.name;
-  const url = item.url;
-  if ((type !== "video" && type !== "image") || typeof id !== "string" || typeof name !== "string" || typeof url !== "string") {
-    return undefined;
-  }
-  const source: McvDataSource = {
-    type,
-    id,
-    name,
-    url,
-  };
-  if (type === "video" && typeof item.youtube_id === "string" && item.youtube_id.trim()) {
-    source.youtube_id = item.youtube_id;
-  }
-  if (type === "video" && typeof item.seconds === "number" && Number.isFinite(item.seconds) && item.seconds >= 0) {
-    source.seconds = Math.floor(item.seconds);
-  }
-  if (type === "video" && typeof item.frames === "number" && Number.isFinite(item.frames) && item.frames >= 0) {
-    source.frames = Math.floor(item.frames);
-  }
-  return source;
-}
 
-function normalizeImportedLineRefs(value: unknown, maxLines: number): number[] {
-  if (!Array.isArray(value)) {
-    return [];
-  }
-  return normalizeLineRefs(
-    value
-      .map((item) => (typeof item === "number" && Number.isInteger(item) ? item : -1))
-      .filter((index) => index >= 0 && index < maxLines)
-  );
-}
 
-function normalizeImportedMcvData(value: unknown): {
-  annotations: ManualAnnotation[];
-  anchors: StructureAnchor[];
-  vertices: StructureVertexData[];
-  source?: McvDataSource;
-} | null {
-  if (typeof value !== "object" || value === null) {
-    return null;
-  }
-  const data = value as Record<string, unknown>;
-  if (!Array.isArray(data.annotations)) {
-    return null;
-  }
 
-  const annotations: ManualAnnotation[] = [];
-  for (const entry of data.annotations) {
-    if (typeof entry !== "object" || entry === null) {
-      continue;
-    }
-    const item = entry as Record<string, unknown>;
-    const axis = normalizeImportedAxis(item.axis);
-    const fromObj = item.from as Record<string, unknown> | undefined;
-    const toObj = item.to as Record<string, unknown> | undefined;
-    const fx = typeof fromObj?.x === "number" ? fromObj.x : null;
-    const fy = typeof fromObj?.y === "number" ? fromObj.y : null;
-    const tx = typeof toObj?.x === "number" ? toObj.x : null;
-    const ty = typeof toObj?.y === "number" ? toObj.y : null;
-    if (axis === null || fx === null || fy === null || tx === null || ty === null) {
-      continue;
-    }
-    const line: ManualAnnotation = {
-      from: { x: fx, y: fy },
-      to: { x: tx, y: ty },
-      axis,
-    };
-    if (typeof item.length === "number" && Number.isFinite(item.length) && item.length > 0) {
-      line.length = item.length;
-    }
-    annotations.push(line);
-  }
 
-  const structure = data.structure as Record<string, unknown> | undefined;
-  const maxLines = annotations.length;
-  const parsedVertices: StructureVertexData[] = [];
-  if (Array.isArray(structure?.vertices)) {
-    for (const raw of structure!.vertices as unknown[]) {
-      if (typeof raw !== "object" || raw === null) {
-        continue;
-      }
-      const item = raw as Record<string, unknown>;
-      const vertex: StructureVertexData = {
-        from: normalizeImportedLineRefs(item.from, maxLines),
-        to: normalizeImportedLineRefs(item.to, maxLines),
-      };
-      if (typeof item.anchor === "number" && Number.isInteger(item.anchor) && item.anchor >= 0) {
-        vertex.anchor = item.anchor;
-      }
-      if (typeof item.x === "number" && Number.isFinite(item.x)) {
-        vertex.x = item.x;
-      }
-      if (typeof item.y === "number" && Number.isFinite(item.y)) {
-        vertex.y = item.y;
-      }
-      if (typeof item.z === "number" && Number.isFinite(item.z)) {
-        vertex.z = item.z;
-      }
-      parsedVertices.push(vertex);
-    }
-  }
 
-  const parsedAnchors: StructureAnchor[] = [];
-  if (Array.isArray(structure?.anchors)) {
-    for (const raw of structure!.anchors as unknown[]) {
-      if (typeof raw !== "object" || raw === null) {
-        continue;
-      }
-      const item = raw as Record<string, unknown>;
-      const anchor: StructureAnchor = {
-        from: normalizeImportedLineRefs(item.from, maxLines),
-        to: normalizeImportedLineRefs(item.to, maxLines),
-        vertex: typeof item.vertex === "number" && Number.isInteger(item.vertex) && item.vertex >= 0 ? item.vertex : -1,
-      };
-      if (typeof item.x === "number" && Number.isFinite(item.x)) {
-        anchor.x = item.x;
-      }
-      if (typeof item.y === "number" && Number.isFinite(item.y)) {
-        anchor.y = item.y;
-      }
-      if (typeof item.z === "number" && Number.isFinite(item.z)) {
-        anchor.z = item.z;
-      }
-      parsedAnchors.push(anchor);
-    }
-  }
 
-  const vertices: StructureVertexData[] = parsedVertices.map((vertex) => ({
-    ...vertex,
-    from: normalizeLineRefs(vertex.from),
-    to: normalizeLineRefs(vertex.to),
-  }));
 
-  parsedAnchors.forEach((anchor, anchorIndex) => {
-    let vertexIndex = anchor.vertex;
-    if (vertexIndex < 0 || vertexIndex >= vertices.length) {
-      vertexIndex = vertices.length;
-      vertices.push({
-        from: normalizeLineRefs(anchor.from),
-        to: normalizeLineRefs(anchor.to),
-        ...(anchor.x !== undefined ? { x: anchor.x } : {}),
-        ...(anchor.y !== undefined ? { y: anchor.y } : {}),
-        ...(anchor.z !== undefined ? { z: anchor.z } : {}),
-        anchor: anchorIndex,
-      });
-      anchor.vertex = vertexIndex;
-    } else {
-      const vertex = vertices[vertexIndex];
-      vertex.anchor = anchorIndex;
-      if (anchor.x !== undefined) {
-        vertex.x = anchor.x;
-      }
-      if (anchor.y !== undefined) {
-        vertex.y = anchor.y;
-      }
-      if (anchor.z !== undefined) {
-        vertex.z = anchor.z;
-      }
-      anchor.vertex = vertexIndex;
-    }
-  });
 
-  vertices.forEach((vertex) => {
-    if (vertex.anchor !== undefined && (vertex.anchor < 0 || vertex.anchor >= parsedAnchors.length)) {
-      delete vertex.anchor;
-    }
-  });
 
-  const source = normalizeImportedSource(data.source);
 
-  return {
-    annotations,
-    anchors: parsedAnchors,
-    vertices,
-    ...(source ? { source } : {}),
-  };
-}
 
 function applyImportedMcvState(data: {
   annotations: ManualAnnotation[];
@@ -4984,16 +3549,16 @@ function applyImportedMcvState(data: {
     ...(line.length !== undefined ? { length: line.length } : {}),
   }));
   MCV_DATA.structure.anchors = data.anchors.map((anchor) => ({
-    from: normalizeLineRefs(anchor.from),
-    to: normalizeLineRefs(anchor.to),
+    from: Geometry.normalizeLineRefs(anchor.from),
+    to: Geometry.normalizeLineRefs(anchor.to),
     vertex: anchor.vertex,
     ...(anchor.x !== undefined ? { x: anchor.x } : {}),
     ...(anchor.y !== undefined ? { y: anchor.y } : {}),
     ...(anchor.z !== undefined ? { z: anchor.z } : {}),
   }));
   MCV_DATA.structure.vertices = data.vertices.map((vertex) => ({
-    from: normalizeLineRefs(vertex.from),
-    to: normalizeLineRefs(vertex.to),
+    from: Geometry.normalizeLineRefs(vertex.from),
+    to: Geometry.normalizeLineRefs(vertex.to),
     ...(vertex.anchor !== undefined ? { anchor: vertex.anchor } : {}),
     ...(vertex.x !== undefined ? { x: vertex.x } : {}),
     ...(vertex.y !== undefined ? { y: vertex.y } : {}),
@@ -5026,7 +3591,7 @@ function applyImportedMcvState(data: {
 }
 
 async function tryLoadMcvSvgFile(file: File): Promise<{ imageDataUrl: string; data: unknown } | null> {
-  const text = await readFileAsText(file);
+  const text = await MediaUtils.readFileAsText(file);
   const parser = new DOMParser();
   const doc = parser.parseFromString(text, "image/svg+xml");
   if (!doc.querySelector("parsererror")) {
@@ -5077,7 +3642,7 @@ async function saveCurrentStateAsSvg(): Promise<void> {
   }
   const width = cropResultCache.width;
   const height = cropResultCache.height;
-  const imageDataUrl = await ensureEmbeddedImageDataUrl(cropResultCache.colorDataUrl);
+  const imageDataUrl = await MediaUtils.ensureEmbeddedImageDataUrl(cropResultCache.colorDataUrl);
   const svgNs = "http://www.w3.org/2000/svg";
   const svg = document.createElementNS(svgNs, "svg");
   svg.setAttribute("xmlns", svgNs);
@@ -5087,9 +3652,9 @@ async function saveCurrentStateAsSvg(): Promise<void> {
   svg.setAttribute("width", String(width));
   svg.setAttribute("height", String(height));
 
-  appendAxisMarkers(svg);
+  SvgUtils.appendAxisMarkers(svg);
 
-  const baseLayer = createSvgLayer(svg, "base", true);
+  const baseLayer = SvgUtils.createSvgLayer(svg, "base", true);
   const baseImage = document.createElementNS(svgNs, "image");
   baseImage.setAttribute("data-role", "mcv-base-image");
   baseImage.setAttribute("href", imageDataUrl);
@@ -5100,20 +3665,20 @@ async function saveCurrentStateAsSvg(): Promise<void> {
   baseImage.setAttribute("preserveAspectRatio", "none");
   baseLayer.appendChild(baseImage);
 
-  const annotationLayer = createSvgLayer(svg, "annotation", false);
-  renderLinesToLayer(annotationLayer, MCV_DATA.annotations, true, true);
+  const annotationLayer = SvgUtils.createSvgLayer(svg, "annotation", false);
+  SvgUtils.renderLinesToLayer(annotationLayer, MCV_DATA.annotations, true, true);
 
-  const structureLayer = createSvgLayer(svg, "structure", true);
-  renderLinesToLayer(structureLayer, MCV_DATA.structure.lines, true, true);
+  const structureLayer = SvgUtils.createSvgLayer(svg, "structure", true);
+  SvgUtils.renderLinesToLayer(structureLayer, MCV_DATA.structure.lines, true, true);
 
-  const anchorsLayer = createSvgLayer(svg, "anchors", false);
+  const anchorsLayer = SvgUtils.createSvgLayer(svg, "anchors", false);
   MCV_DATA.structure.anchors.forEach((anchor, index) => {
     const point = getAnchorPoint(anchor);
     if (!point) {
       return;
     }
-    appendSvgPointDot(anchorsLayer, point, "#5dff74", 2.4);
-    appendSvgAnchorLabel(anchorsLayer, point, getAnchorLabel(anchor, index), "#5dff74");
+    SvgUtils.appendSvgPointDot(anchorsLayer, point, "#5dff74", 2.4);
+    SvgUtils.appendSvgAnchorLabel(anchorsLayer, point, getAnchorLabel(anchor, index), "#5dff74");
   });
 
   const includeVerticesLayer =
@@ -5121,13 +3686,13 @@ async function saveCurrentStateAsSvg(): Promise<void> {
     vertexSolveRenderData !== null &&
     vertexSolveRenderData.conflictVertexIndex === null;
   if (includeVerticesLayer) {
-    const verticesLayer = createSvgLayer(svg, "vertices", false);
+    const verticesLayer = SvgUtils.createSvgLayer(svg, "vertices", false);
     MCV_DATA.structure.vertices.forEach((vertex) => {
       const point = getVertexDotPoint(vertex);
       if (!point) {
         return;
       }
-      appendSvgPointDot(verticesLayer, point, "#5dff74", 2.2);
+      SvgUtils.appendSvgPointDot(verticesLayer, point, "#5dff74", 2.2);
     });
   }
 
@@ -5156,11 +3721,11 @@ async function handleUploadedFile(file: File): Promise<void> {
   selectedUploadFilename = file.name;
   pendingImportedMcvState = null;
   pendingImportedVideoSourceForImageLoad = null;
-  if (isSvgFile(file)) {
+  if (MediaUtils.isSvgFile(file)) {
     try {
       const parsed = await tryLoadMcvSvgFile(file);
       if (parsed) {
-        const normalized = normalizeImportedMcvData(parsed.data);
+        const normalized = MediaUtils.normalizeImportedMcvData(parsed.data);
         if (normalized) {
           pendingImportedMcvState = normalized;
           if (normalized.source?.type === "video") {
@@ -5185,7 +3750,7 @@ async function handleUploadedFile(file: File): Promise<void> {
   openViewer({
     tab: "upload",
     id: "upload-file",
-    kind: inferMediaKindFromFile(file),
+    kind: MediaUtils.inferMediaKindFromFile(file),
     title: file.name,
     url: objectUrl,
     isObjectUrl: true,
@@ -5215,7 +3780,7 @@ function syncViewerTimeInputs(force = false): void {
   const fractional = safe - wholeSeconds;
   const frameBase = getViewerFrameBase();
   const frame = Math.min(frameBase - 1, Math.floor(fractional * frameBase));
-  viewerHmsInput.value = `${formatTimestamp(wholeSeconds)}|${frame}`;
+  viewerHmsInput.value = `${MediaUtils.formatTimestamp(wholeSeconds)}|${frame}`;
 }
 
 function parseFrameSuffix(raw: string): { base: string; frame: number } | null {
@@ -5251,7 +3816,7 @@ function seekViewerFromInput(): void {
   if (!parsedWithFrame) {
     return;
   }
-  const baseSeconds = parseTimestampSeconds(parsedWithFrame.base);
+  const baseSeconds = MediaUtils.parseTimestampSeconds(parsedWithFrame.base);
   if (baseSeconds === null) {
     return;
   }
@@ -5298,7 +3863,7 @@ function updateMcvSourceVideoTimestampFromCurrentViewer(): void {
     (MCV_DATA.source.youtube_id && viewerActiveVideoContext.youtubeId
       ? MCV_DATA.source.youtube_id === viewerActiveVideoContext.youtubeId
       : false) ||
-    normalizePossibleUrl(MCV_DATA.source.url) === normalizePossibleUrl(viewerActiveVideoContext.url);
+    MediaUtils.normalizePossibleUrl(MCV_DATA.source.url) === MediaUtils.normalizePossibleUrl(viewerActiveVideoContext.url);
   if (!sameVideo) {
     return;
   }
@@ -5583,7 +4148,7 @@ function mountImportedSourceVideoForCurrentImage(source: McvDataSource, attempt 
   if (source.seconds !== undefined || source.frames !== undefined) {
     linkedVideo.initialSeekSeconds =
       Math.max(0, source.seconds ?? 0) + Math.max(0, source.frames ?? 0) / getViewerFrameBase();
-    linkedVideo.timestampLabel = `${formatTimestamp(Math.max(0, source.seconds ?? 0))}|${Math.max(0, source.frames ?? 0)}`;
+    linkedVideo.timestampLabel = `${MediaUtils.formatTimestamp(Math.max(0, source.seconds ?? 0))}|${Math.max(0, source.frames ?? 0)}`;
   }
   renderVideoViewerUi(viewerContent, linkedVideo, {
     containerRole: "linked-video-source",
@@ -5594,7 +4159,7 @@ function mountImportedSourceVideoForCurrentImage(source: McvDataSource, attempt 
 function getAnalyzedFrameTitle(): string {
   const { seconds, frame } = getCurrentViewerTimeParts();
   const sourceTitle = viewerActiveVideoContext?.title ? ` from ${viewerActiveVideoContext.title}` : "";
-  return `Frame${sourceTitle} @ ${formatTimestamp(seconds)}|${frame}`;
+  return `Frame${sourceTitle} @ ${MediaUtils.formatTimestamp(seconds)}|${frame}`;
 }
 
 async function captureViewerFrameObjectUrl(): Promise<string> {
@@ -5752,7 +4317,7 @@ function renderMediaList(): void {
       : rawMediaEntries.filter(([id, item]) => matchesMediaSearch(id, item, "images"));
 
   if (mediaEntries.length === 0) {
-    const hasQuery = normalizeSearchToken(mediaSearchQuery).length > 0;
+    const hasQuery = MediaUtils.normalizeSearchToken(mediaSearchQuery).length > 0;
     if (hasQuery) {
       setMediaMessage(activeMediaTab === "videos" ? "No matching videos found." : "No matching images found.");
       return;
@@ -6192,15 +4757,15 @@ function handleSearchEnter(rawInput: string): void {
     return;
   }
 
-  const url = parseUrlOrNull(trimmed);
+  const url = MediaUtils.parseUrlOrNull(trimmed);
   if (!url) {
     return;
   }
 
   clearMediaError();
 
-  if (isYoutubeUrl(url)) {
-    const youtubeId = extractYoutubeId(url);
+  if (MediaUtils.isYoutubeUrl(url)) {
+    const youtubeId = MediaUtils.extractYoutubeId(url);
     if (!youtubeId) {
       setMediaError(NO_YOUTUBE_VIDEO_ERROR);
       return;
@@ -6211,10 +4776,10 @@ function handleSearchEnter(rawInput: string): void {
       return;
     }
     activeMediaTab = "videos";
-    const timestampLabel = extractYoutubeTimestampLabel(url);
+    const timestampLabel = MediaUtils.extractYoutubeTimestampLabel(url);
     const initialSeekSeconds = (() => {
       const raw = (url.searchParams.get("t") || "").trim();
-      const parsed = parseTimestampSeconds(raw);
+      const parsed = MediaUtils.parseTimestampSeconds(raw);
       return parsed === null ? undefined : parsed;
     })();
     openViewer({
@@ -6231,7 +4796,7 @@ function handleSearchEnter(rawInput: string): void {
     return;
   }
 
-  const normalizedUrl = normalizeUrlForMatch(url);
+  const normalizedUrl = MediaUtils.normalizeUrlForMatch(url);
   const matchedMedia = findMediaByNormalizedUrl(normalizedUrl);
   if (matchedMedia) {
     activeMediaTab = matchedMedia.tab;
@@ -6240,7 +4805,7 @@ function handleSearchEnter(rawInput: string): void {
     return;
   }
 
-  const inferredKind = inferMediaKindFromUrl(url);
+  const inferredKind = MediaUtils.inferMediaKindFromUrl(url);
   activeMediaTab = inferredKind === "image" ? "images" : "videos";
   openViewer({
     tab: activeMediaTab,
@@ -6412,7 +4977,7 @@ async function loadMediaLibrary(): Promise<void> {
     if (!response.ok) {
       throw new Error(`HTTP ${response.status}`);
     }
-    const parsed = parseMediaLibrary(await response.json());
+    const parsed = MediaUtils.parseMediaLibrary(await response.json());
     if (!parsed) {
       throw new Error("Invalid media schema");
     }
