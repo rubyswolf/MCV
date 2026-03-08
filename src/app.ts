@@ -316,7 +316,7 @@ const opopSettings: OpopSettings = {
   whiskersPerPixel: 4,
   whiskersPerLine: 128,
   whiskerOpacityPercent: 50,
-  normalSearchRadiusPx: 12,
+  normalSearchRadiusPx: 2,
   iterations: 6,
 };
 const MCV_DATA: { annotations: ManualAnnotation[]; structure: StructureData; source?: McvDataSource } = {
@@ -1062,7 +1062,7 @@ function refreshOpopSettingsUi(): void {
   straightnessValue.textContent = opopSettings.straightnessStrength.toFixed(2);
   whiskerModeInput.value = opopSettings.whiskerMode;
   whiskerCountLabel.textContent =
-    opopSettings.whiskerMode === "per_pixel" ? "Whiskers per pixel" : "Whiskers per line";
+    opopSettings.whiskerMode === "per_pixel" ? "Pixels per whisker" : "Whiskers per line";
   whiskerCountInput.value = String(
     opopSettings.whiskerMode === "per_pixel" ? opopSettings.whiskersPerPixel : opopSettings.whiskersPerLine
   );
@@ -2731,6 +2731,70 @@ function getDraftPotentialLinkIndexes(draft: DraftManualLine): Set<number> {
   return potential;
 }
 
+function getOpopWhiskerCountForLine(segment: McvLineSegment): number {
+  const dx = segment[2] - segment[0];
+  const dy = segment[3] - segment[1];
+  const lineLength = Math.hypot(dx, dy);
+  if (lineLength <= 0) {
+    return 0;
+  }
+  if (opopSettings.whiskerMode === "per_pixel") {
+    return Math.max(1, Math.round(lineLength / opopSettings.whiskersPerPixel));
+  }
+  return Math.max(1, Math.round(opopSettings.whiskersPerLine));
+}
+
+function appendOpopWhiskersForSegment(
+  parent: SVGElement,
+  segment: McvLineSegment,
+  stroke: string,
+  strokeWidth: number
+): void {
+  if (!opopSettings.enabled) {
+    return;
+  }
+  const dx = segment[2] - segment[0];
+  const dy = segment[3] - segment[1];
+  const lineLength = Math.hypot(dx, dy);
+  if (lineLength <= 0) {
+    return;
+  }
+  const whiskerCount = getOpopWhiskerCountForLine(segment);
+  if (whiskerCount <= 0) {
+    return;
+  }
+  const radius = Math.max(0, opopSettings.normalSearchRadiusPx);
+  if (radius <= 0) {
+    return;
+  }
+
+  const tangentX = dx / lineLength;
+  const tangentY = dy / lineLength;
+  const normalX = -tangentY;
+  const normalY = tangentX;
+  const opacity = clampNumber(opopSettings.whiskerOpacityPercent / 100, 0, 1);
+
+  const appendAt = (t: number) => {
+    const cx = segment[0] + dx * t;
+    const cy = segment[1] + dy * t;
+    const whisker: McvLineSegment = [
+      cx - normalX * radius,
+      cy - normalY * radius,
+      cx + normalX * radius,
+      cy + normalY * radius,
+    ];
+    SvgUtils.appendSvgLine(parent, whisker, stroke, strokeWidth, opacity);
+  };
+
+  if (whiskerCount === 1) {
+    appendAt(0.5);
+    return;
+  }
+  for (let i = 0; i < whiskerCount; i += 1) {
+    appendAt(i / (whiskerCount - 1));
+  }
+}
+
 function createManualModeCropResultSvg(
   width: number,
   height: number,
@@ -2783,6 +2847,7 @@ function createManualModeCropResultSvg(
       const axisColor = SvgUtils.getAxisColor(sourceLine.axis);
       const segment: McvLineSegment = [line.from.x, line.from.y, line.to.x, line.to.y];
       SvgUtils.appendSvgLine(sceneGroup, segment, axisColor, 2.2, 1);
+      appendOpopWhiskersForSegment(sceneGroup, segment, axisColor, 2.2);
     });
   } else {
     linesToRender.forEach((line, index) => {
@@ -2807,6 +2872,7 @@ function createManualModeCropResultSvg(
         1,
         anchorMode || vertexSolveMode ? undefined : SvgUtils.getAxisMarkerId(line.axis)
       );
+      appendOpopWhiskersForSegment(sceneGroup, segment, axisColor, 2);
       if (!anchorMode && !vertexSolveMode) {
         SvgUtils.appendSvgLineLabel(sceneGroup, segment, line.length, axisColor);
       }
@@ -2823,6 +2889,7 @@ function createManualModeCropResultSvg(
       0.95,
       SvgUtils.getAxisMarkerId(manualDraftLine.axis)
     );
+    appendOpopWhiskersForSegment(sceneGroup, draftSegment, axisColor, 2);
     SvgUtils.appendSvgLineLabel(sceneGroup, draftSegment, manualDraftLine.length, axisColor);
   }
 

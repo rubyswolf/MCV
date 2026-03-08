@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import re
 import shlex
 import shutil
 import subprocess
@@ -187,6 +188,35 @@ def resolve_ninja_exe() -> Path | None:
     return None
 
 
+def resolve_emscripten_version(emscripten_dir: Path | None) -> str | None:
+    if emscripten_dir is None:
+        return None
+
+    candidates = [
+        emscripten_dir / "emcc.bat",
+        emscripten_dir / "emcc",
+    ]
+    emcc = next((cand for cand in candidates if cand.exists()), None)
+    if emcc is None:
+        return None
+
+    try:
+        result = subprocess.run(
+            [str(emcc), "--version"],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+    except OSError:
+        return None
+
+    version_text = (result.stdout or "") + "\n" + (result.stderr or "")
+    match = re.search(r"\b(\d+\.\d+\.\d+)\b", version_text)
+    if match:
+        return match.group(1)
+    return None
+
+
 def main() -> None:
     parser = make_parser()
     args = parser.parse_args()
@@ -197,6 +227,7 @@ def main() -> None:
     config_path = args.config.resolve()
     build_js = validate_paths(opencv_dir, config_path)
     emscripten_dir = resolve_emscripten_dir(args.emscripten_dir, repo_root)
+    emscripten_version = resolve_emscripten_version(emscripten_dir)
     cmake_exe = resolve_cmake_exe(args.cmake_exe)
     ninja_exe = resolve_ninja_exe()
 
@@ -239,6 +270,9 @@ def main() -> None:
         cmd.append(f"--cmake_option=-DCMAKE_TOOLCHAIN_FILE={toolchain}")
         cmd.append(f"--cmake_option=-DCMAKE_C_COMPILER={(emscripten_dir / 'emcc.bat').resolve()}")
         cmd.append(f"--cmake_option=-DCMAKE_CXX_COMPILER={(emscripten_dir / 'em++.bat').resolve()}")
+        if emscripten_version is not None:
+            # Ensure OpenCV JS CMake logic knows the SDK version and can skip deprecated flags.
+            cmd.append(f"--cmake_option=-DEMSCRIPTEN_VERSION={emscripten_version}")
     for opt in args.cmake_option:
         cmd.append(f"--cmake_option={opt}")
     if args.simd:
@@ -263,6 +297,10 @@ def main() -> None:
         print(f"- Using ninja at: {ninja_exe}")
     if emscripten_dir is not None:
         print(f"- Using emscripten at: {emscripten_dir}")
+        if emscripten_version is not None:
+            print(f"- Detected emscripten version: {emscripten_version}")
+        else:
+            print("- Could not parse emscripten version from emcc --version.")
     else:
         print("- Emscripten path was not auto-detected.")
     print("- This command builds single-file output (no --disable_single_file).")
