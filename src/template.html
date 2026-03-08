@@ -30,6 +30,51 @@ __MCV_CSS__
       <div id="viewer-content" class="viewer-content"></div>
     </div>
   </main>
+  <section id="opop-stage" class="card opop-stage hidden">
+    <div class="opop-header">
+      <h3 class="opop-title">Optical Optimisation</h3>
+      <label class="opop-toggle-row" for="opop-enabled">
+        <input id="opop-enabled" type="checkbox" />
+        <span>Enable refinement (opop)</span>
+      </label>
+    </div>
+    <div class="opop-grid">
+      <label class="opop-field" for="opop-alignment-strength">
+        <span class="opop-label">Alignment strength</span>
+        <input id="opop-alignment-strength" class="opop-range" type="range" min="0" max="5" step="0.05" />
+        <span id="opop-alignment-strength-value" class="opop-value"></span>
+      </label>
+      <label class="opop-field" for="opop-straightness-strength">
+        <span class="opop-label">Straightness strength</span>
+        <input id="opop-straightness-strength" class="opop-range" type="range" min="0" max="5" step="0.05" />
+        <span id="opop-straightness-strength-value" class="opop-value"></span>
+      </label>
+      <label class="opop-field" for="opop-whisker-mode">
+        <span class="opop-label">Whisker sampling mode</span>
+        <select id="opop-whisker-mode" class="opop-input">
+          <option value="per_pixel">Per pixel span</option>
+          <option value="per_line">Fixed per line</option>
+        </select>
+      </label>
+      <label class="opop-field" for="opop-whisker-count">
+        <span id="opop-whisker-count-label" class="opop-label">Whiskers per pixel</span>
+        <input id="opop-whisker-count" class="opop-input" type="number" min="1" max="4096" step="1" />
+      </label>
+      <label class="opop-field" for="opop-whisker-opacity">
+        <span class="opop-label">Whisker opacity</span>
+        <input id="opop-whisker-opacity" class="opop-range" type="range" min="0" max="100" step="1" />
+        <span id="opop-whisker-opacity-value" class="opop-value"></span>
+      </label>
+      <label class="opop-field" for="opop-normal-search-radius">
+        <span class="opop-label">Normal search radius (px)</span>
+        <input id="opop-normal-search-radius" class="opop-input" type="number" min="1" max="128" step="0.5" />
+      </label>
+      <label class="opop-field" for="opop-iterations">
+        <span class="opop-label">Iterations per pass</span>
+        <input id="opop-iterations" class="opop-input" type="number" min="1" max="64" step="1" />
+      </label>
+    </div>
+  </section>
   <section id="viewer-full-image-stage" class="viewer-full-image-stage hidden">
     <img id="viewer-full-image" class="viewer-full-image" alt="" />
     <div id="viewer-crop-result" class="viewer-crop-result hidden"></div>

@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 import sys
 from pathlib import Path
+import base64
+import hashlib
 import math
 
 REQUIREMENTS_FILENAME = "mcv-requirements.txt"
@@ -38,6 +40,95 @@ except ImportError as exc:
 # @mcv-insert HTML_PAGE
 
 app = Flask(__name__)
+SOBEL_CACHE_BY_SESSION = {}
+
+
+def _normalize_session_id(raw):
+    if not isinstance(raw, str):
+        return "__default__"
+    session_id = raw.strip()
+    return session_id if session_id else "__default__"
+
+
+def _decode_image_data_url_to_bgr(image_data_url):
+    if not isinstance(image_data_url, str) or "," not in image_data_url:
+        raise ValueError("Invalid image_data_url")
+    header, encoded = image_data_url.split(",", 1)
+    if ";base64" not in header:
+        raise ValueError("image_data_url must be base64 encoded")
+    try:
+        raw_bytes = base64.b64decode(encoded, validate=True)
+    except Exception as exc:
+        raise ValueError("Invalid image_data_url base64 payload") from exc
+    buffer = np.frombuffer(raw_bytes, dtype=np.uint8)
+    image_bgr = cv2.imdecode(buffer, cv2.IMREAD_COLOR)
+    if image_bgr is None:
+        raise ValueError("Could not decode image data")
+    return image_bgr
+
+
+def _compute_color_sobel(image_bgr):
+    rgb = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2RGB)
+    channels = cv2.split(rgb)
+    height, width = rgb.shape[:2]
+    sobel_x = np.zeros((height, width, 3), dtype=np.float32)
+    sobel_y = np.zeros((height, width, 3), dtype=np.float32)
+    for index, channel in enumerate(channels):
+        sobel_x[:, :, index] = cv2.Sobel(channel, cv2.CV_32F, 1, 0, ksize=3)
+        sobel_y[:, :, index] = cv2.Sobel(channel, cv2.CV_32F, 0, 1, ksize=3)
+    return sobel_x, sobel_y
+
+
+def _precompute_sobel_cache(args):
+    if not isinstance(args, dict):
+        raise ValueError("args must be an object")
+    image_data_url = args.get("image_data_url")
+    if not isinstance(image_data_url, str) or not image_data_url.strip():
+        raise ValueError("image_data_url is required")
+    session_id = _normalize_session_id(args.get("session_id"))
+    cache_key_raw = args.get("cache_key")
+    if isinstance(cache_key_raw, str) and cache_key_raw.strip():
+        cache_key = cache_key_raw.strip()
+    else:
+        cache_key = hashlib.sha1(image_data_url.encode("utf-8")).hexdigest()
+
+    session_cache = SOBEL_CACHE_BY_SESSION.setdefault(session_id, {})
+    cached_entry = session_cache.get(cache_key)
+    if isinstance(cached_entry, dict):
+        return {
+            "session_id": session_id,
+            "cache_key": cache_key,
+            "cached": True,
+            "width": int(cached_entry.get("width", 0)),
+            "height": int(cached_entry.get("height", 0)),
+        }
+
+    image_bgr = _decode_image_data_url_to_bgr(image_data_url)
+    sobel_x, sobel_y = _compute_color_sobel(image_bgr)
+    height, width = image_bgr.shape[:2]
+    session_cache[cache_key] = {
+        "width": int(width),
+        "height": int(height),
+        "gx": sobel_x,
+        "gy": sobel_y,
+    }
+    return {
+        "session_id": session_id,
+        "cache_key": cache_key,
+        "cached": False,
+        "width": int(width),
+        "height": int(height),
+    }
+
+
+def _clear_sobel_cache(args):
+    session_id = _normalize_session_id(args.get("session_id") if isinstance(args, dict) else None)
+    existing = SOBEL_CACHE_BY_SESSION.pop(session_id, None)
+    cleared = len(existing) if isinstance(existing, dict) else 0
+    return {
+        "session_id": session_id,
+        "cleared": int(cleared),
+    }
 
 
 def _is_finite_number(value):
@@ -501,6 +592,39 @@ def api_mcv():
     op = payload.get("op")
     args = payload.get("args") or {}
 
+    if op == "cv.precomputeSobel":
+        try:
+            return jsonify({"ok": True, "data": _precompute_sobel_cache(args)})
+        except Exception as exc:
+            return (
+                jsonify(
+                    {
+                        "ok": False,
+                        "error": {
+                            "code": "SOBEL_CACHE_ERROR",
+                            "message": str(exc),
+                        },
+                    }
+                ),
+                400,
+            )
+    if op == "cv.clearCache":
+        try:
+            return jsonify({"ok": True, "data": _clear_sobel_cache(args)})
+        except Exception as exc:
+            return (
+                jsonify(
+                    {
+                        "ok": False,
+                        "error": {
+                            "code": "SOBEL_CACHE_CLEAR_ERROR",
+                            "message": str(exc),
+                        },
+                    }
+                ),
+                400,
+            )
+
     if op == "cv.poseSolve":
         try:
             return jsonify({"ok": True, "data": run_pose_solve(args)})
@@ -530,6 +654,16 @@ def api_mcv():
         ),
         400,
     )
+
+
+@app.route("/api/mcv/cache/clear", methods=["GET", "POST"])
+def api_mcv_cache_clear():
+    payload = request.get_json(silent=True) or {}
+    session_id = payload.get("session_id")
+    if session_id is None:
+        session_id = request.args.get("session_id")
+    result = _clear_sobel_cache({"session_id": session_id})
+    return jsonify({"ok": True, "data": result})
 
 
 @app.get("/")

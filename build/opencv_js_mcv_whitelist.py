@@ -26,6 +26,13 @@ core = {
     "Algorithm": [],
 }
 
+imgproc = {
+    "": [
+        "cvtColor",
+        "Sobel",
+    ],
+}
+
 calib3d = {
     "": [
         "Rodrigues",
@@ -36,4 +43,4 @@ calib3d = {
     ],
 }
 
-white_list = makeWhiteList([core, calib3d])
+white_list = makeWhiteList([core, imgproc, calib3d])

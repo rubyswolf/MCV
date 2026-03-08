@@ -1,6 +1,6 @@
 import { wrapDegrees180 } from "./geometry";
 
-type McvOperation = "cv.poseSolve";
+type McvOperation = "cv.poseSolve" | "cv.precomputeSobel" | "cv.clearCache";
 
 type McvRequest<TArgs = Record<string, unknown>> = {
   op: McvOperation;
@@ -94,6 +94,25 @@ type McvPoseSolveResult = {
   }>;
 };
 
+type McvSobelPrecomputeArgs = {
+  image_data_url: string;
+  session_id: string;
+  cache_key: string;
+};
+
+type McvSobelPrecomputeResult = {
+  cache_key: string;
+  width: number;
+  height: number;
+  cached: boolean;
+  session_id: string;
+};
+
+type McvSobelCacheClearResult = {
+  cleared: number;
+  session_id: string;
+};
+
 type PoseCorrespondence = {
   image: [number, number];
   world: [number, number, number];
@@ -116,9 +135,18 @@ type McvClientConfig = {
 type McvClientRuntime = {
   callMcvApi: <TData>(requestBody: McvRequest) => Promise<McvResponse<TData>>;
   runPoseSolve: (args: McvPoseSolveArgs) => Promise<McvPoseSolveResult>;
+  prepareSobelCache: (imageDataUrl: string) => Promise<void>;
+  clearSobelCache: (reason?: "viewer_exit" | "unload") => Promise<void>;
   fetchMediaApi: () => Promise<Response>;
   isMediaApiAvailable: () => boolean;
   isDataApiAvailable: () => boolean;
+};
+
+type McvWebSobelCacheEntry = {
+  width: number;
+  height: number;
+  gx: Float32Array;
+  gy: Float32Array;
 };
 
 function isFiniteNumber(value: unknown): value is number {
@@ -163,6 +191,133 @@ function loadScriptOnce(scriptUrl: string): Promise<void> {
     });
     document.head.appendChild(script);
   });
+}
+
+function hashStringFnv1aHex(value: string): string {
+  let hash = 0x811c9dc5;
+  for (let i = 0; i < value.length; i += 1) {
+    hash ^= value.charCodeAt(i);
+    hash = Math.imul(hash, 0x01000193);
+  }
+  return (hash >>> 0).toString(16).padStart(8, "0");
+}
+
+function createSessionId(): string {
+  if (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function") {
+    return crypto.randomUUID();
+  }
+  const randomPart = Math.random().toString(36).slice(2);
+  return `mcv-${Date.now().toString(36)}-${randomPart}`;
+}
+
+async function decodeImageDataUrlToCanvas(dataUrl: string): Promise<HTMLCanvasElement> {
+  return await new Promise<HTMLCanvasElement>((resolve, reject) => {
+    const image = new Image();
+    image.decoding = "async";
+    image.onload = () => {
+      const width = image.naturalWidth || image.width;
+      const height = image.naturalHeight || image.height;
+      if (width <= 0 || height <= 0) {
+        reject(new Error("Decoded image has invalid dimensions"));
+        return;
+      }
+      const canvas = document.createElement("canvas");
+      canvas.width = width;
+      canvas.height = height;
+      const ctx = canvas.getContext("2d");
+      if (!ctx) {
+        reject(new Error("Canvas context unavailable"));
+        return;
+      }
+      ctx.drawImage(image, 0, 0, width, height);
+      resolve(canvas);
+    };
+    image.onerror = () => {
+      reject(new Error("Failed to decode image data URL"));
+    };
+    image.src = dataUrl;
+  });
+}
+
+async function computeColorSobelWeb(
+  getWebMcvRuntime: () => Promise<any>,
+  imageDataUrl: string
+): Promise<McvWebSobelCacheEntry> {
+  const cv = await getWebMcvRuntime();
+  const canvas = await decodeImageDataUrlToCanvas(imageDataUrl);
+  const ctx = canvas.getContext("2d");
+  if (!ctx) {
+    throw new Error("Canvas context unavailable");
+  }
+  const width = canvas.width;
+  const height = canvas.height;
+  const imageData = ctx.getImageData(0, 0, width, height);
+  const pixelCount = width * height;
+
+  let rgbaMat: any = null;
+  let rgbMat: any = null;
+  let channels: any = null;
+  try {
+    rgbaMat = new cv.Mat(height, width, cv.CV_8UC4);
+    rgbaMat.data.set(imageData.data);
+    rgbMat = new cv.Mat();
+    cv.cvtColor(rgbaMat, rgbMat, cv.COLOR_RGBA2RGB);
+    channels = new cv.MatVector();
+    cv.split(rgbMat, channels);
+
+    const gx = new Float32Array(pixelCount * 3);
+    const gy = new Float32Array(pixelCount * 3);
+    for (let channelIndex = 0; channelIndex < 3; channelIndex += 1) {
+      let channelMat: any = null;
+      let sobelXMat: any = null;
+      let sobelYMat: any = null;
+      try {
+        channelMat = channels.get(channelIndex);
+        sobelXMat = new cv.Mat();
+        sobelYMat = new cv.Mat();
+        cv.Sobel(channelMat, sobelXMat, cv.CV_32F, 1, 0, 3, 1, 0, cv.BORDER_DEFAULT);
+        cv.Sobel(channelMat, sobelYMat, cv.CV_32F, 0, 1, 3, 1, 0, cv.BORDER_DEFAULT);
+
+        const dataX = sobelXMat.data32F as Float32Array | undefined;
+        const dataY = sobelYMat.data32F as Float32Array | undefined;
+        if (!dataX || !dataY || dataX.length < pixelCount || dataY.length < pixelCount) {
+          throw new Error("Unexpected Sobel output layout");
+        }
+
+        for (let pixelIndex = 0; pixelIndex < pixelCount; pixelIndex += 1) {
+          const outIndex = pixelIndex * 3 + channelIndex;
+          gx[outIndex] = Number(dataX[pixelIndex]);
+          gy[outIndex] = Number(dataY[pixelIndex]);
+        }
+      } finally {
+        if (sobelYMat && typeof sobelYMat.delete === "function") {
+          sobelYMat.delete();
+        }
+        if (sobelXMat && typeof sobelXMat.delete === "function") {
+          sobelXMat.delete();
+        }
+        if (channelMat && typeof channelMat.delete === "function") {
+          channelMat.delete();
+        }
+      }
+    }
+    return {
+      width,
+      height,
+      gx,
+      gy,
+    };
+  } finally {
+    if (channels && typeof channels.delete === "function") {
+      channels.delete();
+    }
+    if (rgbMat && typeof rgbMat.delete === "function") {
+      rgbMat.delete();
+    }
+    if (rgbaMat && typeof rgbaMat.delete === "function") {
+      rgbaMat.delete();
+    }
+  }
 }
 
 export function buildPoseCorrespondencesFromStructure(
@@ -805,6 +960,8 @@ async function runWebPoseSolve(
 
 export function createMcvClient(config: McvClientConfig): McvClientRuntime {
   let cvPromise: Promise<unknown> | null = null;
+  const sobelSessionId = createSessionId();
+  const webSobelCache = new Map<string, McvWebSobelCacheEntry>();
 
   async function getWebMcvRuntime(): Promise<any> {
     if (!cvPromise) {
@@ -841,6 +998,65 @@ export function createMcvClient(config: McvClientConfig): McvClientRuntime {
       throw new Error(response.error.message || "Pose solve failed");
     }
     return response.data;
+  }
+
+  async function prepareSobelCache(imageDataUrl: string): Promise<void> {
+    if (typeof imageDataUrl !== "string" || !imageDataUrl.trim()) {
+      throw new Error("image_data_url is required");
+    }
+    const cacheKey = hashStringFnv1aHex(imageDataUrl);
+    if (config.backend === "web") {
+      if (webSobelCache.has(cacheKey)) {
+        return;
+      }
+      const entry = await computeColorSobelWeb(getWebMcvRuntime, imageDataUrl);
+      webSobelCache.set(cacheKey, entry);
+      return;
+    }
+
+    const response = await callMcvApi<McvSobelPrecomputeResult>({
+      op: "cv.precomputeSobel",
+      args: {
+        image_data_url: imageDataUrl,
+        session_id: sobelSessionId,
+        cache_key: cacheKey,
+      } satisfies McvSobelPrecomputeArgs,
+    });
+    if (!response.ok) {
+      throw new Error(response.error.message || "Failed to precompute Sobel cache");
+    }
+  }
+
+  async function clearSobelCache(reason: "viewer_exit" | "unload" = "viewer_exit"): Promise<void> {
+    if (config.backend === "web") {
+      if (reason === "unload") {
+        webSobelCache.clear();
+      }
+      return;
+    }
+
+    if (reason === "unload" && typeof navigator !== "undefined" && typeof navigator.sendBeacon === "function") {
+      const url = `/api/mcv/cache/clear?session_id=${encodeURIComponent(sobelSessionId)}`;
+      try {
+        const payload = new Blob([JSON.stringify({ session_id: sobelSessionId })], {
+          type: "application/json",
+        });
+        navigator.sendBeacon(url, payload);
+        return;
+      } catch {
+        // Fall through to standard fetch request.
+      }
+    }
+
+    const response = await callMcvApi<McvSobelCacheClearResult>({
+      op: "cv.clearCache",
+      args: {
+        session_id: sobelSessionId,
+      },
+    });
+    if (!response.ok) {
+      throw new Error(response.error.message || "Failed to clear Sobel cache");
+    }
   }
 
   async function callMcvApi<TData>(requestBody: McvRequest): Promise<McvResponse<TData>> {
@@ -918,6 +1134,8 @@ export function createMcvClient(config: McvClientConfig): McvClientRuntime {
   return {
     callMcvApi,
     runPoseSolve,
+    prepareSobelCache,
+    clearSobelCache,
     fetchMediaApi,
     isMediaApiAvailable,
     isDataApiAvailable,

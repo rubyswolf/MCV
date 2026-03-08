@@ -8,7 +8,7 @@ import {
   buildPoseCorrespondencesFromStructure as buildPoseCorrespondencesFromStructureImpl,
   createMcvClient,
 } from "./app/mcvClient";
-type McvOperation = "cv.poseSolve";
+type McvOperation = "cv.poseSolve" | "cv.precomputeSobel" | "cv.clearCache";
 
 type McvRequest<TArgs = Record<string, unknown>> = {
   op: McvOperation;
@@ -149,6 +149,18 @@ type DraftManualLine = {
   length?: number;
 };
 type ManualInteractionMode = "draw" | "anchor" | "edit" | "vertexSolve" | "poseSolve" | "reproject";
+type OpopWhiskerMode = "per_pixel" | "per_line";
+type OpopSettings = {
+  enabled: boolean;
+  alignmentStrength: number;
+  straightnessStrength: number;
+  whiskerMode: OpopWhiskerMode;
+  whiskersPerPixel: number;
+  whiskersPerLine: number;
+  whiskerOpacityPercent: number;
+  normalSearchRadiusPx: number;
+  iterations: number;
+};
 type StructureVertex = {
   endpointIds: number[];
   point: ManualPoint;
@@ -186,6 +198,12 @@ type McvClientApi = {
   mcv: {
     call: typeof callMcvApi;
     runPoseSolve: typeof runPoseSolve;
+    prepareSobelCache: typeof prepareSobelCache;
+    clearSobelCache: typeof clearSobelCache;
+    opop: {
+      getSettings: typeof getOpopSettings;
+      setSettings: typeof setOpopSettings;
+    };
     backend: "python" | "web";
   };
 };
@@ -290,6 +308,17 @@ let cropResultCache:
   | null = null;
 let manualAxisSelection: ManualAxis = "x";
 let manualAxisStartsBackwards = false;
+const opopSettings: OpopSettings = {
+  enabled: true,
+  alignmentStrength: 1,
+  straightnessStrength: 1,
+  whiskerMode: "per_pixel",
+  whiskersPerPixel: 4,
+  whiskersPerLine: 128,
+  whiskerOpacityPercent: 50,
+  normalSearchRadiusPx: 12,
+  iterations: 6,
+};
 const MCV_DATA: { annotations: ManualAnnotation[]; structure: StructureData; source?: McvDataSource } = {
   annotations: [],
   structure: {
@@ -787,6 +816,14 @@ async function runPoseSolve(args: McvPoseSolveArgs): Promise<McvPoseSolveResult>
   return await mcvRuntime.runPoseSolve(args);
 }
 
+async function prepareSobelCache(imageDataUrl: string): Promise<void> {
+  await mcvRuntime.prepareSobelCache(imageDataUrl);
+}
+
+async function clearSobelCache(reason: "viewer_exit" | "unload" = "viewer_exit"): Promise<void> {
+  await mcvRuntime.clearSobelCache(reason);
+}
+
 async function callMcvApi<TData>(requestBody: McvRequest): Promise<McvResponse<TData>> {
   return await mcvRuntime.callMcvApi<TData>(requestBody);
 }
@@ -802,6 +839,51 @@ function isMediaApiAvailable(): boolean {
 function isDataApiAvailable(): boolean {
   return mcvRuntime.isDataApiAvailable();
 }
+
+function clampNumber(value: number, min: number, max: number): number {
+  return Math.min(max, Math.max(min, value));
+}
+
+function getOpopSettings(): OpopSettings {
+  return { ...opopSettings };
+}
+
+function setOpopSettings(patch: Partial<OpopSettings>): OpopSettings {
+  if (patch.enabled !== undefined) {
+    opopSettings.enabled = Boolean(patch.enabled);
+  }
+  if (patch.whiskerMode === "per_pixel" || patch.whiskerMode === "per_line") {
+    opopSettings.whiskerMode = patch.whiskerMode;
+  }
+  if (patch.alignmentStrength !== undefined && Number.isFinite(patch.alignmentStrength)) {
+    opopSettings.alignmentStrength = clampNumber(patch.alignmentStrength, 0, 5);
+  }
+  if (patch.straightnessStrength !== undefined && Number.isFinite(patch.straightnessStrength)) {
+    opopSettings.straightnessStrength = clampNumber(patch.straightnessStrength, 0, 5);
+  }
+  if (patch.whiskersPerPixel !== undefined && Number.isFinite(patch.whiskersPerPixel)) {
+    const next = Math.round(clampNumber(patch.whiskersPerPixel, 1, 4096));
+    opopSettings.whiskersPerPixel = next;
+    opopSettings.whiskersPerLine = next;
+  }
+  if (patch.whiskersPerLine !== undefined && Number.isFinite(patch.whiskersPerLine)) {
+    const next = Math.round(clampNumber(patch.whiskersPerLine, 1, 4096));
+    opopSettings.whiskersPerPixel = next;
+    opopSettings.whiskersPerLine = next;
+  }
+  if (patch.whiskerOpacityPercent !== undefined && Number.isFinite(patch.whiskerOpacityPercent)) {
+    opopSettings.whiskerOpacityPercent = Math.round(clampNumber(patch.whiskerOpacityPercent, 0, 100));
+  }
+  if (patch.normalSearchRadiusPx !== undefined && Number.isFinite(patch.normalSearchRadiusPx)) {
+    opopSettings.normalSearchRadiusPx = clampNumber(patch.normalSearchRadiusPx, 1, 128);
+  }
+  if (patch.iterations !== undefined && Number.isFinite(patch.iterations)) {
+    opopSettings.iterations = Math.round(clampNumber(patch.iterations, 1, 64));
+  }
+  refreshOpopSettingsUi();
+  return getOpopSettings();
+}
+
 function installGlobalApi(): void {
   window.MCV_API = {
     media: {
@@ -816,6 +898,12 @@ function installGlobalApi(): void {
     mcv: {
       call: callMcvApi,
       runPoseSolve: runPoseSolve,
+      prepareSobelCache: prepareSobelCache,
+      clearSobelCache: clearSobelCache,
+      opop: {
+        getSettings: getOpopSettings,
+        setSettings: setOpopSettings,
+      },
       backend: __MCV_BACKEND__,
     },
   };
@@ -863,12 +951,223 @@ function getViewerCropResultNode(): HTMLDivElement | null {
   return document.getElementById("viewer-crop-result") as HTMLDivElement | null;
 }
 
+function getOpopStageNode(): HTMLDivElement | null {
+  return document.getElementById("opop-stage") as HTMLDivElement | null;
+}
+
+function getOpopEnabledInputNode(): HTMLInputElement | null {
+  return document.getElementById("opop-enabled") as HTMLInputElement | null;
+}
+
+function getOpopAlignmentStrengthInputNode(): HTMLInputElement | null {
+  return document.getElementById("opop-alignment-strength") as HTMLInputElement | null;
+}
+
+function getOpopAlignmentStrengthValueNode(): HTMLSpanElement | null {
+  return document.getElementById("opop-alignment-strength-value") as HTMLSpanElement | null;
+}
+
+function getOpopStraightnessStrengthInputNode(): HTMLInputElement | null {
+  return document.getElementById("opop-straightness-strength") as HTMLInputElement | null;
+}
+
+function getOpopStraightnessStrengthValueNode(): HTMLSpanElement | null {
+  return document.getElementById("opop-straightness-strength-value") as HTMLSpanElement | null;
+}
+
+function getOpopWhiskerModeNode(): HTMLSelectElement | null {
+  return document.getElementById("opop-whisker-mode") as HTMLSelectElement | null;
+}
+
+function getOpopWhiskerCountLabelNode(): HTMLSpanElement | null {
+  return document.getElementById("opop-whisker-count-label") as HTMLSpanElement | null;
+}
+
+function getOpopWhiskerCountNode(): HTMLInputElement | null {
+  return document.getElementById("opop-whisker-count") as HTMLInputElement | null;
+}
+
+function getOpopWhiskerOpacityInputNode(): HTMLInputElement | null {
+  return document.getElementById("opop-whisker-opacity") as HTMLInputElement | null;
+}
+
+function getOpopWhiskerOpacityValueNode(): HTMLSpanElement | null {
+  return document.getElementById("opop-whisker-opacity-value") as HTMLSpanElement | null;
+}
+
+function getOpopNormalSearchRadiusNode(): HTMLInputElement | null {
+  return document.getElementById("opop-normal-search-radius") as HTMLInputElement | null;
+}
+
+function getOpopIterationsNode(): HTMLInputElement | null {
+  return document.getElementById("opop-iterations") as HTMLInputElement | null;
+}
+
 function getViewerCropResultSvgNode(): SVGSVGElement | null {
   const cropResultNode = getViewerCropResultNode();
   if (!cropResultNode) {
     return null;
   }
   return cropResultNode.firstElementChild as SVGSVGElement | null;
+}
+
+function shouldShowOpopStage(): boolean {
+  return cropResultCache !== null && getManualInteractionMode() !== "poseSolve";
+}
+
+function refreshOpopStageVisibility(): void {
+  const opopStage = getOpopStageNode();
+  if (!opopStage) {
+    return;
+  }
+  opopStage.classList.toggle("hidden", !shouldShowOpopStage());
+}
+
+function refreshOpopSettingsUi(): void {
+  const stageNode = getOpopStageNode();
+  const enabledInput = getOpopEnabledInputNode();
+  const alignmentInput = getOpopAlignmentStrengthInputNode();
+  const alignmentValue = getOpopAlignmentStrengthValueNode();
+  const straightnessInput = getOpopStraightnessStrengthInputNode();
+  const straightnessValue = getOpopStraightnessStrengthValueNode();
+  const whiskerModeInput = getOpopWhiskerModeNode();
+  const whiskerCountLabel = getOpopWhiskerCountLabelNode();
+  const whiskerCountInput = getOpopWhiskerCountNode();
+  const whiskerOpacityInput = getOpopWhiskerOpacityInputNode();
+  const whiskerOpacityValue = getOpopWhiskerOpacityValueNode();
+  const normalSearchRadiusInput = getOpopNormalSearchRadiusNode();
+  const iterationsInput = getOpopIterationsNode();
+  if (
+    !stageNode ||
+    !enabledInput ||
+    !alignmentInput ||
+    !alignmentValue ||
+    !straightnessInput ||
+    !straightnessValue ||
+    !whiskerModeInput ||
+    !whiskerCountLabel ||
+    !whiskerCountInput ||
+    !whiskerOpacityInput ||
+    !whiskerOpacityValue ||
+    !normalSearchRadiusInput ||
+    !iterationsInput
+  ) {
+    return;
+  }
+
+  enabledInput.checked = opopSettings.enabled;
+  alignmentInput.value = opopSettings.alignmentStrength.toFixed(2);
+  alignmentValue.textContent = opopSettings.alignmentStrength.toFixed(2);
+  straightnessInput.value = opopSettings.straightnessStrength.toFixed(2);
+  straightnessValue.textContent = opopSettings.straightnessStrength.toFixed(2);
+  whiskerModeInput.value = opopSettings.whiskerMode;
+  whiskerCountLabel.textContent =
+    opopSettings.whiskerMode === "per_pixel" ? "Whiskers per pixel" : "Whiskers per line";
+  whiskerCountInput.value = String(
+    opopSettings.whiskerMode === "per_pixel" ? opopSettings.whiskersPerPixel : opopSettings.whiskersPerLine
+  );
+  whiskerOpacityInput.value = String(opopSettings.whiskerOpacityPercent);
+  whiskerOpacityValue.textContent = `${opopSettings.whiskerOpacityPercent}%`;
+  normalSearchRadiusInput.value = opopSettings.normalSearchRadiusPx.toFixed(1);
+  iterationsInput.value = String(opopSettings.iterations);
+
+  const disabled = !opopSettings.enabled;
+  alignmentInput.disabled = disabled;
+  straightnessInput.disabled = disabled;
+  whiskerModeInput.disabled = disabled;
+  whiskerCountInput.disabled = disabled;
+  whiskerOpacityInput.disabled = disabled;
+  normalSearchRadiusInput.disabled = disabled;
+  iterationsInput.disabled = disabled;
+
+  stageNode.classList.toggle("opop-disabled", disabled);
+  refreshOpopStageVisibility();
+}
+
+function installOpopUiHandlers(): void {
+  const stageNode = getOpopStageNode();
+  const enabledInput = getOpopEnabledInputNode();
+  const alignmentInput = getOpopAlignmentStrengthInputNode();
+  const straightnessInput = getOpopStraightnessStrengthInputNode();
+  const whiskerModeInput = getOpopWhiskerModeNode();
+  const whiskerCountInput = getOpopWhiskerCountNode();
+  const whiskerOpacityInput = getOpopWhiskerOpacityInputNode();
+  const normalSearchRadiusInput = getOpopNormalSearchRadiusNode();
+  const iterationsInput = getOpopIterationsNode();
+  if (
+    !stageNode ||
+    !enabledInput ||
+    !alignmentInput ||
+    !straightnessInput ||
+    !whiskerModeInput ||
+    !whiskerCountInput ||
+    !whiskerOpacityInput ||
+    !normalSearchRadiusInput ||
+    !iterationsInput
+  ) {
+    return;
+  }
+  if (stageNode.dataset.opopBound === "true") {
+    refreshOpopSettingsUi();
+    return;
+  }
+  stageNode.dataset.opopBound = "true";
+
+  enabledInput.addEventListener("change", () => {
+    setOpopSettings({ enabled: enabledInput.checked });
+  });
+  alignmentInput.addEventListener("input", () => {
+    const value = Number(alignmentInput.value);
+    if (Number.isFinite(value)) {
+      setOpopSettings({ alignmentStrength: value });
+    }
+  });
+  straightnessInput.addEventListener("input", () => {
+    const value = Number(straightnessInput.value);
+    if (Number.isFinite(value)) {
+      setOpopSettings({ straightnessStrength: value });
+    }
+  });
+  whiskerModeInput.addEventListener("change", () => {
+    const nextMode = whiskerModeInput.value === "per_line" ? "per_line" : "per_pixel";
+    setOpopSettings({ whiskerMode: nextMode });
+  });
+  whiskerCountInput.addEventListener("change", () => {
+    const value = Number(whiskerCountInput.value);
+    if (Number.isFinite(value)) {
+      if (opopSettings.whiskerMode === "per_pixel") {
+        setOpopSettings({ whiskersPerPixel: value });
+      } else {
+        setOpopSettings({ whiskersPerLine: value });
+      }
+    } else {
+      refreshOpopSettingsUi();
+    }
+  });
+  whiskerOpacityInput.addEventListener("input", () => {
+    const value = Number(whiskerOpacityInput.value);
+    if (Number.isFinite(value)) {
+      setOpopSettings({ whiskerOpacityPercent: value });
+    }
+  });
+  normalSearchRadiusInput.addEventListener("change", () => {
+    const value = Number(normalSearchRadiusInput.value);
+    if (Number.isFinite(value)) {
+      setOpopSettings({ normalSearchRadiusPx: value });
+    } else {
+      refreshOpopSettingsUi();
+    }
+  });
+  iterationsInput.addEventListener("change", () => {
+    const value = Number(iterationsInput.value);
+    if (Number.isFinite(value)) {
+      setOpopSettings({ iterations: value });
+    } else {
+      refreshOpopSettingsUi();
+    }
+  });
+
+  refreshOpopSettingsUi();
 }
 
 function refreshUnsavedActionUi(): void {
@@ -1219,6 +1518,7 @@ function clearViewerFullImage(): void {
   hideViewerCropResult();
   removePoseSolvePanel();
   stopViewerFrameRateProbe();
+  refreshOpopStageVisibility();
 }
 
 function scrollViewerFullImageIntoView(): void {
@@ -1272,6 +1572,16 @@ function showViewerFullImage(src: string, alt: string): void {
         width,
         height,
       };
+      void prepareSobelCache(colorDataUrl).catch((error) => {
+        const details = error instanceof Error ? error.message : String(error);
+        if (__MCV_BACKEND__ === "web") {
+          setMediaError(
+            `Sobel precompute failed in web mode. Rebuild/update opencv.js whitelist (missing Sobel exports likely). ${details}`
+          );
+        } else {
+          setMediaError(`Sobel precompute failed on backend: ${details}`);
+        }
+      });
       renderCropResultFromCache();
       if (pendingImportedMcvState) {
         applyImportedMcvState(pendingImportedMcvState);
@@ -2722,6 +3032,7 @@ function renderCropResultFromCache(): void {
     if (imageStage) {
       imageStage.classList.add("hidden");
     }
+    refreshOpopStageVisibility();
     return;
   }
   if (getManualInteractionMode() === "poseSolve") {
@@ -2730,6 +3041,7 @@ function renderCropResultFromCache(): void {
       imageStage.classList.add("hidden");
     }
     renderPoseSolvePanel();
+    refreshOpopStageVisibility();
     return;
   }
   removePoseSolvePanel();
@@ -2749,6 +3061,7 @@ function renderCropResultFromCache(): void {
   sizeCropResultElement(svg, cropResultCache.width, cropResultCache.height);
   cropResultNode.replaceChildren(svg);
   showViewerCropResult();
+  refreshOpopStageVisibility();
 }
 
 function updateManualDraftFromPointer(pointer: PointerEvent): void {
@@ -3710,6 +4023,9 @@ function closeViewer(): void {
   pendingImportedVideoSourceForImageLoad = null;
   stopViewerFrameRateProbe();
   clearViewerFullImage();
+  void clearSobelCache("viewer_exit").catch(() => {
+    // Ignore background cache-clear failures when leaving viewer.
+  });
   revokeAnalyzedImageObjectUrl();
   revokeViewerObjectUrl();
   setViewerMode(false);
@@ -4368,6 +4684,11 @@ function installUiHandlers(): void {
     event.preventDefault();
     event.returnValue = "";
   });
+  window.addEventListener("pagehide", () => {
+    void clearSobelCache("unload").catch(() => {
+      // Ignore shutdown-time cache clear failures.
+    });
+  });
   document.addEventListener("keydown", handleViewerKeybind);
   document.addEventListener("keydown", (event) => {
     const target = event.target as HTMLElement | null;
@@ -4503,6 +4824,7 @@ async function loadMediaLibrary(): Promise<void> {
 function bootstrap(): void {
   launchSelectionIntent = parseLaunchSelectionIntent();
   installGlobalApi();
+  installOpopUiHandlers();
   installUiHandlers();
   setTabButtonState();
   renderMediaBox();
