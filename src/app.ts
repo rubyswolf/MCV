@@ -160,6 +160,7 @@ type OpopSettings = {
   whiskerOpacityPercent: number;
   normalSearchRadiusPx: number;
   iterations: number;
+  imageSmoothingEnabled: boolean;
 };
 type StructureVertex = {
   endpointIds: number[];
@@ -318,6 +319,7 @@ const opopSettings: OpopSettings = {
   whiskerOpacityPercent: 50,
   normalSearchRadiusPx: 2,
   iterations: 6,
+  imageSmoothingEnabled: false,
 };
 const MCV_DATA: { annotations: ManualAnnotation[]; structure: StructureData; source?: McvDataSource } = {
   annotations: [],
@@ -880,6 +882,12 @@ function setOpopSettings(patch: Partial<OpopSettings>): OpopSettings {
   if (patch.iterations !== undefined && Number.isFinite(patch.iterations)) {
     opopSettings.iterations = Math.round(clampNumber(patch.iterations, 1, 64));
   }
+  if (patch.imageSmoothingEnabled !== undefined) {
+    opopSettings.imageSmoothingEnabled = Boolean(patch.imageSmoothingEnabled);
+    if (cropResultCache && getManualInteractionMode() !== "poseSolve") {
+      renderCropResultFromCache();
+    }
+  }
   refreshOpopSettingsUi();
   return getOpopSettings();
 }
@@ -1003,6 +1011,10 @@ function getOpopIterationsNode(): HTMLInputElement | null {
   return document.getElementById("opop-iterations") as HTMLInputElement | null;
 }
 
+function getOpopImageSmoothingEnabledNode(): HTMLInputElement | null {
+  return document.getElementById("opop-image-smoothing-enabled") as HTMLInputElement | null;
+}
+
 function getViewerCropResultSvgNode(): SVGSVGElement | null {
   const cropResultNode = getViewerCropResultNode();
   if (!cropResultNode) {
@@ -1037,6 +1049,7 @@ function refreshOpopSettingsUi(): void {
   const whiskerOpacityValue = getOpopWhiskerOpacityValueNode();
   const normalSearchRadiusInput = getOpopNormalSearchRadiusNode();
   const iterationsInput = getOpopIterationsNode();
+  const imageSmoothingEnabledInput = getOpopImageSmoothingEnabledNode();
   if (
     !stageNode ||
     !enabledInput ||
@@ -1050,7 +1063,8 @@ function refreshOpopSettingsUi(): void {
     !whiskerOpacityInput ||
     !whiskerOpacityValue ||
     !normalSearchRadiusInput ||
-    !iterationsInput
+    !iterationsInput ||
+    !imageSmoothingEnabledInput
   ) {
     return;
   }
@@ -1070,6 +1084,7 @@ function refreshOpopSettingsUi(): void {
   whiskerOpacityValue.textContent = `${opopSettings.whiskerOpacityPercent}%`;
   normalSearchRadiusInput.value = opopSettings.normalSearchRadiusPx.toFixed(1);
   iterationsInput.value = String(opopSettings.iterations);
+  imageSmoothingEnabledInput.checked = opopSettings.imageSmoothingEnabled;
 
   const disabled = !opopSettings.enabled;
   alignmentInput.disabled = disabled;
@@ -1094,6 +1109,7 @@ function installOpopUiHandlers(): void {
   const whiskerOpacityInput = getOpopWhiskerOpacityInputNode();
   const normalSearchRadiusInput = getOpopNormalSearchRadiusNode();
   const iterationsInput = getOpopIterationsNode();
+  const imageSmoothingEnabledInput = getOpopImageSmoothingEnabledNode();
   if (
     !stageNode ||
     !enabledInput ||
@@ -1103,7 +1119,8 @@ function installOpopUiHandlers(): void {
     !whiskerCountInput ||
     !whiskerOpacityInput ||
     !normalSearchRadiusInput ||
-    !iterationsInput
+    !iterationsInput ||
+    !imageSmoothingEnabledInput
   ) {
     return;
   }
@@ -1165,6 +1182,9 @@ function installOpopUiHandlers(): void {
     } else {
       refreshOpopSettingsUi();
     }
+  });
+  imageSmoothingEnabledInput.addEventListener("change", () => {
+    setOpopSettings({ imageSmoothingEnabled: imageSmoothingEnabledInput.checked });
   });
 
   refreshOpopSettingsUi();
@@ -2800,7 +2820,12 @@ function createManualModeCropResultSvg(
   height: number,
   colorDataUrl: string
 ): SVGSVGElement {
-  const svg = SvgUtils.createCropResultSvgBase(width, height, colorDataUrl);
+  const svg = SvgUtils.createCropResultSvgBase(
+    width,
+    height,
+    colorDataUrl,
+    opopSettings.imageSmoothingEnabled
+  );
   SvgUtils.appendAxisMarkers(svg);
   const sceneGroup = svg.querySelector('[data-role="viewer-scene"]') as SVGGElement | null;
   if (!sceneGroup) {

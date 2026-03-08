@@ -39,7 +39,8 @@ type McvLineSegment = [number, number, number, number];
 export function createCropResultSvgBase(
   width: number,
   height: number,
-  imageDataUrl: string
+  imageDataUrl: string,
+  smoothImage = false
 ): SVGSVGElement {
   const svgNs = "http://www.w3.org/2000/svg";
   const svg = document.createElementNS(svgNs, "svg");
@@ -56,6 +57,7 @@ export function createCropResultSvgBase(
   imageNode.setAttribute("width", String(width));
   imageNode.setAttribute("height", String(height));
   imageNode.setAttribute("preserveAspectRatio", "none");
+  imageNode.setAttribute("image-rendering", smoothImage ? "auto" : "pixelated");
   const sceneGroup = document.createElementNS(svgNs, "g");
   sceneGroup.setAttribute("data-role", "viewer-scene");
   sceneGroup.appendChild(imageNode);

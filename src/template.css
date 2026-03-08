@@ -358,6 +358,11 @@ __MCV_BODY_STYLE__
       user-select: none;
       cursor: pointer;
     }
+    .opop-toggle-footer {
+      grid-column: 1 / -1;
+      justify-self: start;
+      margin-top: 2px;
+    }
     .opop-grid {
       display: grid;
       gap: 10px;
