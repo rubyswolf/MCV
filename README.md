@@ -1,6 +1,6 @@
 # What does MCV do?
 
-Minecraft Computer Vision (MCV) is a tool for recreating Minecraft player poses from images and video. It lets you label points on a Minecraft world image ~~with edge-detection assistance~~ by drawing lines, pair those points with in-game world coordinates, and then solve the PnL problem (estimating camera pose and focal length from 2D-3D correspondences). This tool was created to assist in collecting evidence for the Dream MCC 11 Parkour cheating controversy, but it can be used for many other applications. For those reasons, it is open source and free for anyone to use. Learn how to use it by reading `Controls.md`.
+Minecraft Computer Vision (MCV) is a tool for recreating Minecraft player poses from images and video. It lets you label points on a Minecraft world image with optical edge detection/refinement assistance by drawing lines, pair those points with in-game world coordinates, and then solve the PnL problem (estimating camera pose and focal length from 2D-3D correspondences). This tool was created to assist in collecting evidence for the Dream MCC 11 Parkour cheating controversy, but it can be used for many other applications. For those reasons, it is open source and free for anyone to use. Learn how to use it by reading `Controls.md`.
 
 # Where does it run?
 
@@ -31,7 +31,7 @@ In the future, I hope to make either a server-side or client-side tool that lets
 
 - /examples
   - /labeled: Some real examples of labeled points and their corresponding world coordinates, along with the original images and ground truths for testing the PnL system.
-  - /images: Some random images that can be used for testing the corner selector tool and ~~edge detection~~.
+  - /images: Some random images that can be used for testing the corner selector tool and edge refinement.
 - /python_prototype: My first working prototype of the corner selector tool and PnP solver, written in Python using OpenCV.
 
 # Build
@@ -126,3 +126,4 @@ Whitelist used for exported JS bindings:
 ~~Let's find out whether or not he cheated together!~~
 
 The highest quality I got from a controlled custom example was 0.0312 blocks or about half a minecraft pixel, which is pretty good! However, the actual footage is heavily compressed and since a lot of the parkour is in enclosed spaces with few features, the accuracy is likely to be worse. This is not enough to determine which jumps were and weren't on the final tick so for the intened application the project has failed. However, the tool is still useful for general pose estimation for any voxel based game/system and map recreation.
+It may actually be useful still with the new updates
