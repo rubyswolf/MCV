@@ -1,6 +1,6 @@
 import { wrapDegrees180 } from "./geometry";
 
-type McvOperation = "cv.poseSolve" | "cv.precomputeSobel" | "cv.clearCache";
+type McvOperation = "cv.poseSolve" | "cv.precomputeSobel" | "cv.clearCache" | "cv.opopRefineLine";
 
 type McvRequest<TArgs = Record<string, unknown>> = {
   op: McvOperation;
@@ -113,6 +113,37 @@ type McvSobelCacheClearResult = {
   session_id: string;
 };
 
+type McvOpopWhiskerMode = "per_pixel" | "per_line";
+
+type McvOpopSettings = {
+  alignmentStrength: number;
+  straightnessStrength: number;
+  whiskerMode: McvOpopWhiskerMode;
+  whiskersPerPixel: number;
+  whiskersPerLine: number;
+  normalSearchRadiusPx: number;
+  iterations: number;
+};
+
+type McvOpopLine = {
+  from: ManualPoint;
+  to: ManualPoint;
+};
+
+type McvOpopRefineLineArgs = {
+  session_id: string;
+  cache_key: string;
+  line: McvOpopLine;
+  settings: McvOpopSettings;
+};
+
+type McvOpopRefineLineResult = {
+  from: ManualPoint;
+  to: ManualPoint;
+  points: ManualPoint[];
+  whisker_count: number;
+};
+
 type PoseCorrespondence = {
   image: [number, number];
   world: [number, number, number];
@@ -135,6 +166,11 @@ type McvClientConfig = {
 type McvClientRuntime = {
   callMcvApi: <TData>(requestBody: McvRequest) => Promise<McvResponse<TData>>;
   runPoseSolve: (args: McvPoseSolveArgs) => Promise<McvPoseSolveResult>;
+  runOpopRefineLine: (
+    imageDataUrl: string,
+    line: McvOpopLine,
+    settings: McvOpopSettings
+  ) => Promise<McvOpopRefineLineResult>;
   prepareSobelCache: (imageDataUrl: string) => Promise<void>;
   clearSobelCache: (reason?: "viewer_exit" | "unload") => Promise<void>;
   fetchMediaApi: () => Promise<Response>;
@@ -318,6 +354,292 @@ async function computeColorSobelWeb(
       rgbaMat.delete();
     }
   }
+}
+
+function clampNumber(value: number, min: number, max: number): number {
+  return Math.min(max, Math.max(min, value));
+}
+
+function computeOpopWhiskerCount(
+  lineLength: number,
+  settings: McvOpopSettings
+): number {
+  if (!Number.isFinite(lineLength) || lineLength <= 0) {
+    return 0;
+  }
+  if (settings.whiskerMode === "per_pixel") {
+    const pixelsPerWhisker = Math.max(1, Math.round(settings.whiskersPerPixel));
+    return Math.max(1, Math.round(lineLength / pixelsPerWhisker));
+  }
+  return Math.max(1, Math.round(settings.whiskersPerLine));
+}
+
+function normalizeVector(x: number, y: number): { x: number; y: number } {
+  const mag = Math.hypot(x, y);
+  if (!(mag > 0)) {
+    return { x: 1, y: 0 };
+  }
+  return { x: x / mag, y: y / mag };
+}
+
+function fitPrincipalLineDirection(
+  points: ManualPoint[],
+  fallback: { x: number; y: number }
+): { center: ManualPoint; direction: { x: number; y: number } } {
+  if (points.length === 0) {
+    return {
+      center: { x: 0, y: 0 },
+      direction: normalizeVector(fallback.x, fallback.y),
+    };
+  }
+  let meanX = 0;
+  let meanY = 0;
+  points.forEach((point) => {
+    meanX += point.x;
+    meanY += point.y;
+  });
+  meanX /= points.length;
+  meanY /= points.length;
+
+  if (points.length < 2) {
+    return {
+      center: { x: meanX, y: meanY },
+      direction: normalizeVector(fallback.x, fallback.y),
+    };
+  }
+
+  let sxx = 0;
+  let sxy = 0;
+  let syy = 0;
+  points.forEach((point) => {
+    const dx = point.x - meanX;
+    const dy = point.y - meanY;
+    sxx += dx * dx;
+    sxy += dx * dy;
+    syy += dy * dy;
+  });
+  const trace = sxx + syy;
+  const det = sxx * syy - sxy * sxy;
+  const term = Math.sqrt(Math.max(0, trace * trace * 0.25 - det));
+  const lambda = trace * 0.5 + term;
+
+  let vx = sxy;
+  let vy = lambda - sxx;
+  if (Math.hypot(vx, vy) < 1e-8) {
+    vx = lambda - syy;
+    vy = sxy;
+  }
+  if (Math.hypot(vx, vy) < 1e-8) {
+    vx = fallback.x;
+    vy = fallback.y;
+  }
+  const direction = normalizeVector(vx, vy);
+  return {
+    center: { x: meanX, y: meanY },
+    direction,
+  };
+}
+
+function sampleBilinearChannel(
+  entry: McvWebSobelCacheEntry,
+  field: Float32Array,
+  x: number,
+  y: number,
+  channel: 0 | 1 | 2
+): number {
+  const width = entry.width;
+  const height = entry.height;
+  const sx = clampNumber(x, 0, width - 1);
+  const sy = clampNumber(y, 0, height - 1);
+  const x0 = Math.floor(sx);
+  const y0 = Math.floor(sy);
+  const x1 = Math.min(width - 1, x0 + 1);
+  const y1 = Math.min(height - 1, y0 + 1);
+  const wx = sx - x0;
+  const wy = sy - y0;
+
+  const idx00 = (y0 * width + x0) * 3 + channel;
+  const idx10 = (y0 * width + x1) * 3 + channel;
+  const idx01 = (y1 * width + x0) * 3 + channel;
+  const idx11 = (y1 * width + x1) * 3 + channel;
+  const a = field[idx00] * (1 - wx) + field[idx10] * wx;
+  const b = field[idx01] * (1 - wx) + field[idx11] * wx;
+  return a * (1 - wy) + b * wy;
+}
+
+function computeDirectionalEdgeScore(
+  entry: McvWebSobelCacheEntry,
+  x: number,
+  y: number,
+  normal: { x: number; y: number },
+  tangent: { x: number; y: number }
+): number {
+  let normalSq = 0;
+  let tangentSq = 0;
+  for (let channel: 0 | 1 | 2 = 0 as 0 | 1 | 2; channel < 3; channel = (channel + 1) as 0 | 1 | 2) {
+    const gx = sampleBilinearChannel(entry, entry.gx, x, y, channel);
+    const gy = sampleBilinearChannel(entry, entry.gy, x, y, channel);
+    const projNormal = gx * normal.x + gy * normal.y;
+    const projTangent = gx * tangent.x + gy * tangent.y;
+    normalSq += projNormal * projNormal;
+    tangentSq += projTangent * projTangent;
+  }
+  return Math.sqrt(normalSq) - 0.2 * Math.sqrt(tangentSq);
+}
+
+function runWebOpopRefineLine(
+  sobelEntry: McvWebSobelCacheEntry,
+  line: McvOpopLine,
+  settings: McvOpopSettings
+): McvOpopRefineLineResult {
+  const ax = Number(line.from?.x);
+  const ay = Number(line.from?.y);
+  const bx = Number(line.to?.x);
+  const by = Number(line.to?.y);
+  if (![ax, ay, bx, by].every((value) => Number.isFinite(value))) {
+    throw new Error("line.from and line.to must be finite points");
+  }
+
+  const dx = bx - ax;
+  const dy = by - ay;
+  const baseLength = Math.hypot(dx, dy);
+  if (!(baseLength > 0)) {
+    return {
+      from: { x: ax, y: ay },
+      to: { x: bx, y: by },
+      points: [],
+      whisker_count: 0,
+    };
+  }
+
+  const whiskerCount = computeOpopWhiskerCount(baseLength, settings);
+  const radius = clampNumber(settings.normalSearchRadiusPx, 0, 256);
+  const iterations = Math.max(1, Math.round(clampNumber(settings.iterations, 1, 64)));
+  const alignmentGain = clampNumber(settings.alignmentStrength * 0.2, 0, 1.5);
+  const straightnessGain = clampNumber(settings.straightnessStrength * 0.12, 0, 1.0);
+
+  const points: ManualPoint[] = [];
+  if (whiskerCount <= 1) {
+    points.push({
+      x: (ax + bx) * 0.5,
+      y: (ay + by) * 0.5,
+    });
+  } else {
+    for (let i = 0; i < whiskerCount; i += 1) {
+      const t = i / (whiskerCount - 1);
+      points.push({
+        x: ax + dx * t,
+        y: ay + dy * t,
+      });
+    }
+  }
+
+  let fallbackDir = normalizeVector(dx, dy);
+  for (let iteration = 0; iteration < iterations; iteration += 1) {
+    const dirSource =
+      points.length >= 2
+        ? normalizeVector(points[points.length - 1].x - points[0].x, points[points.length - 1].y - points[0].y)
+        : fallbackDir;
+    const tangent = normalizeVector(dirSource.x, dirSource.y);
+    const normal = { x: -tangent.y, y: tangent.x };
+    fallbackDir = tangent;
+
+    const updatedTargets: ManualPoint[] = [];
+    for (let pointIndex = 0; pointIndex < points.length; pointIndex += 1) {
+      const point = points[pointIndex];
+      let bestScore = Number.NEGATIVE_INFINITY;
+      let bestOffset = 0;
+      const maxOffset = Math.floor(radius);
+      for (let offsetStep = -maxOffset; offsetStep <= maxOffset; offsetStep += 1) {
+        const offset = Number(offsetStep);
+        const sampleX = point.x + normal.x * offset;
+        const sampleY = point.y + normal.y * offset;
+        const score = computeDirectionalEdgeScore(sobelEntry, sampleX, sampleY, normal, tangent);
+        if (score > bestScore) {
+          bestScore = score;
+          bestOffset = offset;
+        }
+      }
+      updatedTargets.push({
+        x: point.x + normal.x * bestOffset,
+        y: point.y + normal.y * bestOffset,
+      });
+    }
+
+    if (alignmentGain > 0) {
+      for (let i = 0; i < points.length; i += 1) {
+        points[i] = {
+          x: points[i].x + (updatedTargets[i].x - points[i].x) * alignmentGain,
+          y: points[i].y + (updatedTargets[i].y - points[i].y) * alignmentGain,
+        };
+      }
+    }
+
+    if (straightnessGain > 0 && points.length >= 2) {
+      const fitted = fitPrincipalLineDirection(points, fallbackDir);
+      const lineDir = fitted.direction;
+      const cx = fitted.center.x;
+      const cy = fitted.center.y;
+      for (let i = 0; i < points.length; i += 1) {
+        const relX = points[i].x - cx;
+        const relY = points[i].y - cy;
+        const scalar = relX * lineDir.x + relY * lineDir.y;
+        const projectedX = cx + scalar * lineDir.x;
+        const projectedY = cy + scalar * lineDir.y;
+        points[i] = {
+          x: points[i].x + (projectedX - points[i].x) * straightnessGain,
+          y: points[i].y + (projectedY - points[i].y) * straightnessGain,
+        };
+      }
+    }
+  }
+
+  const finalFit = fitPrincipalLineDirection(points, fallbackDir);
+  const lineDir = finalFit.direction;
+  let minScalar = Number.POSITIVE_INFINITY;
+  let maxScalar = Number.NEGATIVE_INFINITY;
+  for (let i = 0; i < points.length; i += 1) {
+    const scalar =
+      (points[i].x - finalFit.center.x) * lineDir.x +
+      (points[i].y - finalFit.center.y) * lineDir.y;
+    if (scalar < minScalar) {
+      minScalar = scalar;
+    }
+    if (scalar > maxScalar) {
+      maxScalar = scalar;
+    }
+  }
+
+  let fromPoint: ManualPoint = {
+    x: finalFit.center.x + lineDir.x * minScalar,
+    y: finalFit.center.y + lineDir.y * minScalar,
+  };
+  let toPoint: ManualPoint = {
+    x: finalFit.center.x + lineDir.x * maxScalar,
+    y: finalFit.center.y + lineDir.y * maxScalar,
+  };
+
+  const originalDir = { x: dx, y: dy };
+  const refinedDir = { x: toPoint.x - fromPoint.x, y: toPoint.y - fromPoint.y };
+  if (originalDir.x * refinedDir.x + originalDir.y * refinedDir.y < 0) {
+    const swap = fromPoint;
+    fromPoint = toPoint;
+    toPoint = swap;
+  }
+
+  const width = sobelEntry.width;
+  const height = sobelEntry.height;
+  const clampPoint = (point: ManualPoint): ManualPoint => ({
+    x: clampNumber(point.x, 0, Math.max(0, width - 1)),
+    y: clampNumber(point.y, 0, Math.max(0, height - 1)),
+  });
+
+  return {
+    from: clampPoint(fromPoint),
+    to: clampPoint(toPoint),
+    points: points.map((point) => clampPoint(point)),
+    whisker_count: whiskerCount,
+  };
 }
 
 export function buildPoseCorrespondencesFromStructure(
@@ -1000,6 +1322,39 @@ export function createMcvClient(config: McvClientConfig): McvClientRuntime {
     return response.data;
   }
 
+  async function runOpopRefineLine(
+    imageDataUrl: string,
+    line: McvOpopLine,
+    settings: McvOpopSettings
+  ): Promise<McvOpopRefineLineResult> {
+    if (typeof imageDataUrl !== "string" || !imageDataUrl.trim()) {
+      throw new Error("image_data_url is required");
+    }
+    const cacheKey = hashStringFnv1aHex(imageDataUrl);
+    if (config.backend === "web") {
+      let sobelEntry = webSobelCache.get(cacheKey);
+      if (!sobelEntry) {
+        sobelEntry = await computeColorSobelWeb(getWebMcvRuntime, imageDataUrl);
+        webSobelCache.set(cacheKey, sobelEntry);
+      }
+      return runWebOpopRefineLine(sobelEntry, line, settings);
+    }
+
+    const response = await callMcvApi<McvOpopRefineLineResult>({
+      op: "cv.opopRefineLine",
+      args: {
+        session_id: sobelSessionId,
+        cache_key: cacheKey,
+        line,
+        settings,
+      } satisfies McvOpopRefineLineArgs,
+    });
+    if (!response.ok) {
+      throw new Error(response.error.message || "OPOP line refinement failed");
+    }
+    return response.data;
+  }
+
   async function prepareSobelCache(imageDataUrl: string): Promise<void> {
     if (typeof imageDataUrl !== "string" || !imageDataUrl.trim()) {
       throw new Error("image_data_url is required");
@@ -1061,7 +1416,41 @@ export function createMcvClient(config: McvClientConfig): McvClientRuntime {
 
   async function callMcvApi<TData>(requestBody: McvRequest): Promise<McvResponse<TData>> {
     if (config.backend === "web") {
-      if (requestBody.op !== "cv.poseSolve") {
+      try {
+        if (requestBody.op === "cv.poseSolve") {
+          const data = await runWebPoseSolve(getWebMcvRuntime, requestBody.args as McvPoseSolveArgs);
+          return {
+            ok: true,
+            data,
+          } as McvResponse<TData>;
+        }
+        if (requestBody.op === "cv.opopRefineLine") {
+          const args = requestBody.args as (McvOpopRefineLineArgs & { image_data_url?: string }) | undefined;
+          const imageDataUrl = typeof args?.image_data_url === "string" ? args.image_data_url : "";
+          if (!imageDataUrl) {
+            return {
+              ok: false,
+              error: {
+                code: "INVALID_ARGS",
+                message: "image_data_url is required for web cv.opopRefineLine",
+              },
+            };
+          }
+          if (!args?.line || !args?.settings) {
+            return {
+              ok: false,
+              error: {
+                code: "INVALID_ARGS",
+                message: "line and settings are required for cv.opopRefineLine",
+              },
+            };
+          }
+          const data = await runOpopRefineLine(imageDataUrl, args.line, args.settings);
+          return {
+            ok: true,
+            data,
+          } as McvResponse<TData>;
+        }
         return {
           ok: false,
           error: {
@@ -1069,14 +1458,6 @@ export function createMcvClient(config: McvClientConfig): McvClientRuntime {
             message: `Unsupported operation in web backend: ${requestBody.op}`,
           },
         };
-      }
-
-      try {
-        const data = await runWebPoseSolve(getWebMcvRuntime, requestBody.args as McvPoseSolveArgs);
-        return {
-          ok: true,
-          data,
-        } as McvResponse<TData>;
       } catch (error) {
         return {
           ok: false,
@@ -1134,6 +1515,7 @@ export function createMcvClient(config: McvClientConfig): McvClientRuntime {
   return {
     callMcvApi,
     runPoseSolve,
+    runOpopRefineLine,
     prepareSobelCache,
     clearSobelCache,
     fetchMediaApi,

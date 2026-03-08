@@ -8,7 +8,7 @@ import {
   buildPoseCorrespondencesFromStructure as buildPoseCorrespondencesFromStructureImpl,
   createMcvClient,
 } from "./app/mcvClient";
-type McvOperation = "cv.poseSolve" | "cv.precomputeSobel" | "cv.clearCache";
+type McvOperation = "cv.poseSolve" | "cv.precomputeSobel" | "cv.clearCache" | "cv.opopRefineLine";
 
 type McvRequest<TArgs = Record<string, unknown>> = {
   op: McvOperation;
@@ -78,6 +78,13 @@ type McvPoseSolveResult = {
   };
   tp_command: string;
   reprojected_lines?: McvReprojectedLine[];
+};
+
+type McvOpopRefineLineResult = {
+  from: ManualPoint;
+  to: ManualPoint;
+  points: ManualPoint[];
+  whisker_count: number;
 };
 
 type McvLineSegment = [number, number, number, number];
@@ -199,6 +206,7 @@ type McvClientApi = {
   mcv: {
     call: typeof callMcvApi;
     runPoseSolve: typeof runPoseSolve;
+    runOpopRefineLine: typeof runOpopRefineLine;
     prepareSobelCache: typeof prepareSobelCache;
     clearSobelCache: typeof clearSobelCache;
     opop: {
@@ -321,6 +329,8 @@ const opopSettings: OpopSettings = {
   iterations: 6,
   imageSmoothingEnabled: false,
 };
+const opopOptimizedPointsByLine = new Map<number, ManualPoint[]>();
+const opopRefineTokenByLine = new Map<number, number>();
 const MCV_DATA: { annotations: ManualAnnotation[]; structure: StructureData; source?: McvDataSource } = {
   annotations: [],
   structure: {
@@ -730,6 +740,8 @@ function popAnnotationWithStructureUnlink(): ManualAnnotation | undefined {
   const removedIndex = MCV_DATA.structure.lines.length - 1;
   const removed = MCV_DATA.annotations.pop();
   MCV_DATA.structure.lines.pop();
+  opopOptimizedPointsByLine.delete(removedIndex);
+  opopRefineTokenByLine.delete(removedIndex);
   MCV_DATA.structure.lines.forEach((line) => {
     line.from.from = line.from.from.filter((value) => value !== removedIndex);
     line.from.to = line.from.to.filter((value) => value !== removedIndex);
@@ -771,6 +783,39 @@ function rebuildStructureFromAnnotations(): void {
   syncStructureEndpointRefs();
 }
 
+function clearOpopOptimizedPoints(): void {
+  opopOptimizedPointsByLine.clear();
+  opopRefineTokenByLine.clear();
+}
+
+function remapOpopIndexesAfterLineRemoval(removedLineIndex: number): void {
+  const remappedPoints = new Map<number, ManualPoint[]>();
+  opopOptimizedPointsByLine.forEach((points, lineIndex) => {
+    if (lineIndex === removedLineIndex) {
+      return;
+    }
+    const nextIndex = lineIndex > removedLineIndex ? lineIndex - 1 : lineIndex;
+    remappedPoints.set(nextIndex, points);
+  });
+  opopOptimizedPointsByLine.clear();
+  remappedPoints.forEach((points, lineIndex) => {
+    opopOptimizedPointsByLine.set(lineIndex, points);
+  });
+
+  const remappedTokens = new Map<number, number>();
+  opopRefineTokenByLine.forEach((token, lineIndex) => {
+    if (lineIndex === removedLineIndex) {
+      return;
+    }
+    const nextIndex = lineIndex > removedLineIndex ? lineIndex - 1 : lineIndex;
+    remappedTokens.set(nextIndex, token);
+  });
+  opopRefineTokenByLine.clear();
+  remappedTokens.forEach((token, lineIndex) => {
+    opopRefineTokenByLine.set(lineIndex, token);
+  });
+}
+
 function resetCropInteractionState(): void {
   MCV_DATA.annotations.length = 0;
   MCV_DATA.structure.lines.length = 0;
@@ -793,6 +838,7 @@ function resetCropInteractionState(): void {
   poseSolveRunToken += 1;
   manualAxisStartsBackwards = false;
   renderAnnotationPreviewHeld = false;
+  clearOpopOptimizedPoints();
   clearAnnotationsDirty();
 }
 
@@ -816,6 +862,29 @@ function wrapDegrees180(angleDeg: number): number {
 
 async function runPoseSolve(args: McvPoseSolveArgs): Promise<McvPoseSolveResult> {
   return await mcvRuntime.runPoseSolve(args);
+}
+
+async function runOpopRefineLine(
+  imageDataUrl: string,
+  line: { from: ManualPoint; to: ManualPoint },
+  settings: OpopSettings
+): Promise<McvOpopRefineLineResult> {
+  return await mcvRuntime.runOpopRefineLine(
+    imageDataUrl,
+    {
+      from: { x: line.from.x, y: line.from.y },
+      to: { x: line.to.x, y: line.to.y },
+    },
+    {
+      alignmentStrength: settings.alignmentStrength,
+      straightnessStrength: settings.straightnessStrength,
+      whiskerMode: settings.whiskerMode,
+      whiskersPerPixel: settings.whiskersPerPixel,
+      whiskersPerLine: settings.whiskersPerLine,
+      normalSearchRadiusPx: settings.normalSearchRadiusPx,
+      iterations: settings.iterations,
+    }
+  );
 }
 
 async function prepareSobelCache(imageDataUrl: string): Promise<void> {
@@ -851,42 +920,80 @@ function getOpopSettings(): OpopSettings {
 }
 
 function setOpopSettings(patch: Partial<OpopSettings>): OpopSettings {
+  let shouldRerender = false;
   if (patch.enabled !== undefined) {
-    opopSettings.enabled = Boolean(patch.enabled);
+    const nextEnabled = Boolean(patch.enabled);
+    if (opopSettings.enabled !== nextEnabled) {
+      opopSettings.enabled = nextEnabled;
+      shouldRerender = true;
+    }
   }
   if (patch.whiskerMode === "per_pixel" || patch.whiskerMode === "per_line") {
-    opopSettings.whiskerMode = patch.whiskerMode;
+    if (opopSettings.whiskerMode !== patch.whiskerMode) {
+      opopSettings.whiskerMode = patch.whiskerMode;
+      shouldRerender = true;
+    }
   }
   if (patch.alignmentStrength !== undefined && Number.isFinite(patch.alignmentStrength)) {
-    opopSettings.alignmentStrength = clampNumber(patch.alignmentStrength, 0, 5);
+    const next = clampNumber(patch.alignmentStrength, 0, 5);
+    if (opopSettings.alignmentStrength !== next) {
+      opopSettings.alignmentStrength = next;
+      shouldRerender = true;
+    }
   }
   if (patch.straightnessStrength !== undefined && Number.isFinite(patch.straightnessStrength)) {
-    opopSettings.straightnessStrength = clampNumber(patch.straightnessStrength, 0, 5);
+    const next = clampNumber(patch.straightnessStrength, 0, 5);
+    if (opopSettings.straightnessStrength !== next) {
+      opopSettings.straightnessStrength = next;
+      shouldRerender = true;
+    }
   }
   if (patch.whiskersPerPixel !== undefined && Number.isFinite(patch.whiskersPerPixel)) {
     const next = Math.round(clampNumber(patch.whiskersPerPixel, 1, 4096));
-    opopSettings.whiskersPerPixel = next;
-    opopSettings.whiskersPerLine = next;
+    if (opopSettings.whiskersPerPixel !== next || opopSettings.whiskersPerLine !== next) {
+      opopSettings.whiskersPerPixel = next;
+      opopSettings.whiskersPerLine = next;
+      shouldRerender = true;
+    }
   }
   if (patch.whiskersPerLine !== undefined && Number.isFinite(patch.whiskersPerLine)) {
     const next = Math.round(clampNumber(patch.whiskersPerLine, 1, 4096));
-    opopSettings.whiskersPerPixel = next;
-    opopSettings.whiskersPerLine = next;
+    if (opopSettings.whiskersPerPixel !== next || opopSettings.whiskersPerLine !== next) {
+      opopSettings.whiskersPerPixel = next;
+      opopSettings.whiskersPerLine = next;
+      shouldRerender = true;
+    }
   }
   if (patch.whiskerOpacityPercent !== undefined && Number.isFinite(patch.whiskerOpacityPercent)) {
-    opopSettings.whiskerOpacityPercent = Math.round(clampNumber(patch.whiskerOpacityPercent, 0, 100));
+    const next = Math.round(clampNumber(patch.whiskerOpacityPercent, 0, 100));
+    if (opopSettings.whiskerOpacityPercent !== next) {
+      opopSettings.whiskerOpacityPercent = next;
+      shouldRerender = true;
+    }
   }
   if (patch.normalSearchRadiusPx !== undefined && Number.isFinite(patch.normalSearchRadiusPx)) {
-    opopSettings.normalSearchRadiusPx = clampNumber(patch.normalSearchRadiusPx, 1, 128);
+    const next = clampNumber(patch.normalSearchRadiusPx, 1, 128);
+    if (opopSettings.normalSearchRadiusPx !== next) {
+      opopSettings.normalSearchRadiusPx = next;
+      shouldRerender = true;
+    }
   }
   if (patch.iterations !== undefined && Number.isFinite(patch.iterations)) {
-    opopSettings.iterations = Math.round(clampNumber(patch.iterations, 1, 64));
+    const next = Math.round(clampNumber(patch.iterations, 1, 64));
+    if (opopSettings.iterations !== next) {
+      opopSettings.iterations = next;
+      shouldRerender = true;
+    }
   }
   if (patch.imageSmoothingEnabled !== undefined) {
-    opopSettings.imageSmoothingEnabled = Boolean(patch.imageSmoothingEnabled);
-    if (cropResultCache && getManualInteractionMode() !== "poseSolve") {
-      renderCropResultFromCache();
+    const next = Boolean(patch.imageSmoothingEnabled);
+    if (opopSettings.imageSmoothingEnabled !== next) {
+      opopSettings.imageSmoothingEnabled = next;
+      shouldRerender = true;
     }
+  }
+  if (shouldRerender && cropResultCache && getManualInteractionMode() !== "poseSolve") {
+    renderCropResultFromCache();
   }
   refreshOpopSettingsUi();
   return getOpopSettings();
@@ -906,6 +1013,7 @@ function installGlobalApi(): void {
     mcv: {
       call: callMcvApi,
       runPoseSolve: runPoseSolve,
+      runOpopRefineLine: runOpopRefineLine,
       prepareSobelCache: prepareSobelCache,
       clearSobelCache: clearSobelCache,
       opop: {
@@ -2651,6 +2759,7 @@ function removeLineAtIndex(lineIndex: number): void {
     return;
   }
   MCV_DATA.annotations.splice(lineIndex, 1);
+  remapOpopIndexesAfterLineRemoval(lineIndex);
   rebuildAnchorsAndVerticesAfterLineRemoval(lineIndex);
   if (manualEditSelectedLineIndex !== null) {
     if (manualEditSelectedLineIndex === lineIndex) {
@@ -2815,6 +2924,70 @@ function appendOpopWhiskersForSegment(
   }
 }
 
+function captureLineSnapshot(line: ManualAnnotation): ManualAnnotation {
+  return {
+    from: { x: line.from.x, y: line.from.y },
+    to: { x: line.to.x, y: line.to.y },
+    axis: line.axis,
+    ...(line.length !== undefined ? { length: line.length } : {}),
+  };
+}
+
+function areLineEndpointsEquivalent(first: ManualAnnotation, second: ManualAnnotation, epsilon = 1e-4): boolean {
+  return (
+    first.axis === second.axis &&
+    Math.abs(first.from.x - second.from.x) <= epsilon &&
+    Math.abs(first.from.y - second.from.y) <= epsilon &&
+    Math.abs(first.to.x - second.to.x) <= epsilon &&
+    Math.abs(first.to.y - second.to.y) <= epsilon
+  );
+}
+
+async function runOpopRefineForLine(
+  lineIndex: number,
+  sourceLine: ManualAnnotation,
+  sourceImageDataUrl: string,
+  settingsSnapshot: OpopSettings
+): Promise<void> {
+  if (!settingsSnapshot.enabled) {
+    opopOptimizedPointsByLine.delete(lineIndex);
+    return;
+  }
+  const nextToken = (opopRefineTokenByLine.get(lineIndex) ?? 0) + 1;
+  opopRefineTokenByLine.set(lineIndex, nextToken);
+  try {
+    const result = await runOpopRefineLine(sourceImageDataUrl, sourceLine, settingsSnapshot);
+    if (opopRefineTokenByLine.get(lineIndex) !== nextToken) {
+      return;
+    }
+    const current = MCV_DATA.annotations[lineIndex];
+    if (!current || !areLineEndpointsEquivalent(current, sourceLine)) {
+      return;
+    }
+
+    current.from = { x: result.from.x, y: result.from.y };
+    current.to = { x: result.to.x, y: result.to.y };
+    opopOptimizedPointsByLine.set(
+      lineIndex,
+      Array.isArray(result.points)
+        ? result.points
+            .filter((point) => Number.isFinite(point.x) && Number.isFinite(point.y))
+            .map((point) => ({ x: point.x, y: point.y }))
+        : []
+    );
+
+    rebuildStructureFromAnnotations();
+    markAnnotationsDirty();
+    renderCropResultFromCache();
+  } catch {
+    if (opopRefineTokenByLine.get(lineIndex) !== nextToken) {
+      return;
+    }
+    opopOptimizedPointsByLine.delete(lineIndex);
+    renderCropResultFromCache();
+  }
+}
+
 function createManualModeCropResultSvg(
   width: number,
   height: number,
@@ -2901,6 +3074,17 @@ function createManualModeCropResultSvg(
       if (!anchorMode && !vertexSolveMode) {
         SvgUtils.appendSvgLineLabel(sceneGroup, segment, line.length, axisColor);
       }
+    });
+  }
+  if (opopSettings.enabled && !reprojectMode) {
+    const opopDotRadius = Math.max(0.3, 0.7 / Math.max(0.01, viewerMotion.zoom));
+    opopOptimizedPointsByLine.forEach((points, lineIndex) => {
+      if (!MCV_DATA.annotations[lineIndex] || !Array.isArray(points)) {
+        return;
+      }
+      points.forEach((point) => {
+        SvgUtils.appendSvgPointDot(sceneGroup, point, "#ffffff", opopDotRadius);
+      });
     });
   }
   if (!anchorMode && !vertexSolveMode && !reprojectMode && manualDraftLine) {
@@ -3287,6 +3471,14 @@ function finalizeManualDraftFromPointer(pointer: PointerEvent): void {
       axis: committedAxis,
       ...(committedLength !== undefined && committedLength > 0 ? { length: committedLength } : {}),
     });
+    const newLineIndex = MCV_DATA.annotations.length - 1;
+    const newLine = MCV_DATA.annotations[newLineIndex];
+    if (newLine && cropResultCache) {
+      const sourceImageDataUrl = cropResultCache.colorDataUrl;
+      const sourceLine = captureLineSnapshot(newLine);
+      const settingsSnapshot = getOpopSettings();
+      void runOpopRefineForLine(newLineIndex, sourceLine, sourceImageDataUrl, settingsSnapshot);
+    }
     manualRedoLines.length = 0;
   }
   renderCropResultFromCache();
@@ -3532,6 +3724,7 @@ function applyImportedMcvState(data: {
   poseSolveState = null;
   poseSolveRunToken += 1;
   renderAnnotationPreviewHeld = false;
+  clearOpopOptimizedPoints();
   clearAnnotationsDirty();
 }
 

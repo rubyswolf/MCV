@@ -131,6 +131,231 @@ def _clear_sobel_cache(args):
     }
 
 
+def _clamp(value, minimum, maximum):
+    return max(minimum, min(maximum, value))
+
+
+def _fit_principal_line(points, fallback_dir):
+    if points.size == 0:
+        fallback = np.array(fallback_dir, dtype=np.float64)
+        n = float(np.linalg.norm(fallback))
+        if n <= 1e-12:
+            fallback = np.array([1.0, 0.0], dtype=np.float64)
+            n = 1.0
+        return np.zeros((2,), dtype=np.float64), fallback / n
+
+    center = np.mean(points, axis=0)
+    if points.shape[0] < 2:
+        fallback = np.array(fallback_dir, dtype=np.float64)
+        n = float(np.linalg.norm(fallback))
+        if n <= 1e-12:
+            fallback = np.array([1.0, 0.0], dtype=np.float64)
+            n = 1.0
+        return center, fallback / n
+
+    centered = points - center
+    cov = centered.T @ centered
+    evals, evecs = np.linalg.eigh(cov)
+    direction = evecs[:, int(np.argmax(evals))]
+    if float(np.linalg.norm(direction)) <= 1e-12:
+        direction = np.array(fallback_dir, dtype=np.float64)
+    n = float(np.linalg.norm(direction))
+    if n <= 1e-12:
+        direction = np.array([1.0, 0.0], dtype=np.float64)
+        n = 1.0
+    return center, direction / n
+
+
+def _sample_bilinear_rgb(field, xs, ys):
+    height, width = field.shape[:2]
+    xs = np.clip(xs, 0.0, max(0.0, float(width - 1)))
+    ys = np.clip(ys, 0.0, max(0.0, float(height - 1)))
+    x0 = np.floor(xs).astype(np.int32)
+    y0 = np.floor(ys).astype(np.int32)
+    x1 = np.clip(x0 + 1, 0, width - 1)
+    y1 = np.clip(y0 + 1, 0, height - 1)
+    wx = (xs - x0).astype(np.float32)
+    wy = (ys - y0).astype(np.float32)
+
+    top_left = field[y0, x0]
+    top_right = field[y0, x1]
+    bot_left = field[y1, x0]
+    bot_right = field[y1, x1]
+    top = top_left * (1.0 - wx[..., None]) + top_right * wx[..., None]
+    bottom = bot_left * (1.0 - wx[..., None]) + bot_right * wx[..., None]
+    return top * (1.0 - wy[..., None]) + bottom * wy[..., None]
+
+
+def _parse_opop_settings(raw):
+    data = raw if isinstance(raw, dict) else {}
+    whisker_mode = data.get("whiskerMode")
+    if whisker_mode not in ("per_pixel", "per_line"):
+        whisker_mode = "per_pixel"
+    alignment = float(data.get("alignmentStrength", 1.0))
+    straightness = float(data.get("straightnessStrength", 1.0))
+    whiskers_per_pixel = int(round(float(data.get("whiskersPerPixel", 4))))
+    whiskers_per_line = int(round(float(data.get("whiskersPerLine", 128))))
+    normal_radius = float(data.get("normalSearchRadiusPx", 2.0))
+    iterations = int(round(float(data.get("iterations", 6))))
+    return {
+        "whiskerMode": whisker_mode,
+        "alignmentStrength": _clamp(alignment, 0.0, 5.0),
+        "straightnessStrength": _clamp(straightness, 0.0, 5.0),
+        "whiskersPerPixel": int(_clamp(whiskers_per_pixel, 1, 4096)),
+        "whiskersPerLine": int(_clamp(whiskers_per_line, 1, 4096)),
+        "normalSearchRadiusPx": _clamp(normal_radius, 0.0, 256.0),
+        "iterations": int(_clamp(iterations, 1, 64)),
+    }
+
+
+def _compute_opop_whisker_count(line_length, settings):
+    if not np.isfinite(line_length) or line_length <= 0.0:
+        return 0
+    if settings["whiskerMode"] == "per_pixel":
+        return max(1, int(round(line_length / max(1, settings["whiskersPerPixel"]))))
+    return max(1, int(round(settings["whiskersPerLine"])))
+
+
+def _opop_refine_line(args):
+    if not isinstance(args, dict):
+        raise ValueError("args must be an object")
+
+    session_id = _normalize_session_id(args.get("session_id"))
+    cache_key_raw = args.get("cache_key")
+    if not isinstance(cache_key_raw, str) or not cache_key_raw.strip():
+        raise ValueError("cache_key is required")
+    cache_key = cache_key_raw.strip()
+
+    session_cache = SOBEL_CACHE_BY_SESSION.get(session_id)
+    if not isinstance(session_cache, dict):
+        raise ValueError("No Sobel cache exists for this session")
+    cache_entry = session_cache.get(cache_key)
+    if not isinstance(cache_entry, dict):
+        raise ValueError("Sobel cache entry not found for this image")
+
+    gx = cache_entry.get("gx")
+    gy = cache_entry.get("gy")
+    width = int(cache_entry.get("width", 0))
+    height = int(cache_entry.get("height", 0))
+    if (
+        not isinstance(gx, np.ndarray)
+        or not isinstance(gy, np.ndarray)
+        or gx.ndim != 3
+        or gy.ndim != 3
+        or gx.shape != gy.shape
+        or gx.shape[2] != 3
+        or width <= 0
+        or height <= 0
+    ):
+        raise ValueError("Invalid Sobel cache entry")
+
+    line = args.get("line")
+    if not isinstance(line, dict):
+        raise ValueError("line is required")
+    line_from = line.get("from")
+    line_to = line.get("to")
+    if not isinstance(line_from, dict) or not isinstance(line_to, dict):
+        raise ValueError("line.from and line.to are required")
+    ax = float(line_from.get("x"))
+    ay = float(line_from.get("y"))
+    bx = float(line_to.get("x"))
+    by = float(line_to.get("y"))
+    if not (np.isfinite(ax) and np.isfinite(ay) and np.isfinite(bx) and np.isfinite(by)):
+        raise ValueError("line endpoints must be finite")
+
+    settings = _parse_opop_settings(args.get("settings"))
+    base_dir = np.array([bx - ax, by - ay], dtype=np.float64)
+    base_length = float(np.linalg.norm(base_dir))
+    if base_length <= 1e-9:
+        return {
+            "from": {"x": float(ax), "y": float(ay)},
+            "to": {"x": float(bx), "y": float(by)},
+            "points": [],
+            "whisker_count": 0,
+        }
+
+    whisker_count = _compute_opop_whisker_count(base_length, settings)
+    if whisker_count <= 0:
+        return {
+            "from": {"x": float(ax), "y": float(ay)},
+            "to": {"x": float(bx), "y": float(by)},
+            "points": [],
+            "whisker_count": 0,
+        }
+
+    if whisker_count == 1:
+        points = np.array([[(ax + bx) * 0.5, (ay + by) * 0.5]], dtype=np.float64)
+    else:
+        t = np.linspace(0.0, 1.0, whisker_count, dtype=np.float64)
+        points = np.stack([ax + (bx - ax) * t, ay + (by - ay) * t], axis=1)
+
+    fallback = base_dir / max(base_length, 1e-12)
+    radius = int(max(0, int(math.floor(settings["normalSearchRadiusPx"]))))
+    iterations = settings["iterations"]
+    alignment_gain = _clamp(settings["alignmentStrength"] * 0.2, 0.0, 1.5)
+    straightness_gain = _clamp(settings["straightnessStrength"] * 0.12, 0.0, 1.0)
+    offsets = np.arange(-radius, radius + 1, dtype=np.float64)
+    if offsets.size == 0:
+        offsets = np.array([0.0], dtype=np.float64)
+
+    for _ in range(iterations):
+        if points.shape[0] >= 2:
+            tangent_raw = points[-1] - points[0]
+        else:
+            tangent_raw = fallback
+        tangent_norm = float(np.linalg.norm(tangent_raw))
+        if tangent_norm <= 1e-12:
+            tangent = fallback
+        else:
+            tangent = tangent_raw / tangent_norm
+        normal = np.array([-tangent[1], tangent[0]], dtype=np.float64)
+        fallback = tangent
+
+        candidate = points[:, None, :] + offsets[None, :, None] * normal[None, None, :]
+        samples_x = candidate[:, :, 0]
+        samples_y = candidate[:, :, 1]
+        gx_s = _sample_bilinear_rgb(gx, samples_x, samples_y)
+        gy_s = _sample_bilinear_rgb(gy, samples_x, samples_y)
+        proj_n = gx_s * normal[0] + gy_s * normal[1]
+        proj_t = gx_s * tangent[0] + gy_s * tangent[1]
+        normal_power = np.sqrt(np.sum(proj_n * proj_n, axis=2))
+        tangent_power = np.sqrt(np.sum(proj_t * proj_t, axis=2))
+        scores = normal_power - 0.2 * tangent_power
+        best_idx = np.argmax(scores, axis=1)
+        best_offsets = offsets[best_idx]
+        targets = points + best_offsets[:, None] * normal[None, :]
+        points = points + alignment_gain * (targets - points)
+
+        if straightness_gain > 0.0 and points.shape[0] >= 2:
+            center, direction = _fit_principal_line(points, fallback)
+            scalars = (points - center) @ direction
+            projected = center[None, :] + scalars[:, None] * direction[None, :]
+            points = points + straightness_gain * (projected - points)
+
+    center, direction = _fit_principal_line(points, fallback)
+    scalars = (points - center) @ direction
+    s_min = float(np.min(scalars))
+    s_max = float(np.max(scalars))
+    refined_from = center + direction * s_min
+    refined_to = center + direction * s_max
+    if float(np.dot(refined_to - refined_from, base_dir)) < 0.0:
+        refined_from, refined_to = refined_to, refined_from
+
+    points[:, 0] = np.clip(points[:, 0], 0.0, max(0.0, float(width - 1)))
+    points[:, 1] = np.clip(points[:, 1], 0.0, max(0.0, float(height - 1)))
+    refined_from[0] = _clamp(float(refined_from[0]), 0.0, max(0.0, float(width - 1)))
+    refined_from[1] = _clamp(float(refined_from[1]), 0.0, max(0.0, float(height - 1)))
+    refined_to[0] = _clamp(float(refined_to[0]), 0.0, max(0.0, float(width - 1)))
+    refined_to[1] = _clamp(float(refined_to[1]), 0.0, max(0.0, float(height - 1)))
+
+    return {
+        "from": {"x": float(refined_from[0]), "y": float(refined_from[1])},
+        "to": {"x": float(refined_to[0]), "y": float(refined_to[1])},
+        "points": [{"x": float(point[0]), "y": float(point[1])} for point in points.tolist()],
+        "whisker_count": int(whisker_count),
+    }
+
+
 def _is_finite_number(value):
     return isinstance(value, (int, float)) and np.isfinite(float(value))
 
@@ -635,6 +860,22 @@ def api_mcv():
                         "ok": False,
                         "error": {
                             "code": "POSE_SOLVE_ERROR",
+                            "message": str(exc),
+                        },
+                    }
+                ),
+                400,
+            )
+    if op == "cv.opopRefineLine":
+        try:
+            return jsonify({"ok": True, "data": _opop_refine_line(args)})
+        except Exception as exc:
+            return (
+                jsonify(
+                    {
+                        "ok": False,
+                        "error": {
+                            "code": "OPOP_REFINE_ERROR",
                             "message": str(exc),
                         },
                     }
