@@ -167,6 +167,7 @@ type OpopSettings = {
   whiskerOpacityPercent: number;
   normalSearchRadiusPx: number;
   iterations: number;
+  includeEndpoints: boolean;
   imageSmoothingEnabled: boolean;
 };
 type StructureVertex = {
@@ -327,6 +328,7 @@ const opopSettings: OpopSettings = {
   whiskerOpacityPercent: 50,
   normalSearchRadiusPx: 2,
   iterations: 6,
+  includeEndpoints: false,
   imageSmoothingEnabled: false,
 };
 const opopOptimizedPointsByLine = new Map<number, ManualPoint[]>();
@@ -883,6 +885,7 @@ async function runOpopRefineLine(
       whiskersPerLine: settings.whiskersPerLine,
       normalSearchRadiusPx: settings.normalSearchRadiusPx,
       iterations: settings.iterations,
+      includeEndpoints: settings.includeEndpoints,
     }
   );
 }
@@ -982,6 +985,13 @@ function setOpopSettings(patch: Partial<OpopSettings>): OpopSettings {
     const next = Math.round(clampNumber(patch.iterations, 1, 64));
     if (opopSettings.iterations !== next) {
       opopSettings.iterations = next;
+      shouldRerender = true;
+    }
+  }
+  if (patch.includeEndpoints !== undefined) {
+    const next = Boolean(patch.includeEndpoints);
+    if (opopSettings.includeEndpoints !== next) {
+      opopSettings.includeEndpoints = next;
       shouldRerender = true;
     }
   }
@@ -1119,6 +1129,10 @@ function getOpopIterationsNode(): HTMLInputElement | null {
   return document.getElementById("opop-iterations") as HTMLInputElement | null;
 }
 
+function getOpopIncludeEndpointsNode(): HTMLInputElement | null {
+  return document.getElementById("opop-include-endpoints") as HTMLInputElement | null;
+}
+
 function getOpopImageSmoothingEnabledNode(): HTMLInputElement | null {
   return document.getElementById("opop-image-smoothing-enabled") as HTMLInputElement | null;
 }
@@ -1157,6 +1171,7 @@ function refreshOpopSettingsUi(): void {
   const whiskerOpacityValue = getOpopWhiskerOpacityValueNode();
   const normalSearchRadiusInput = getOpopNormalSearchRadiusNode();
   const iterationsInput = getOpopIterationsNode();
+  const includeEndpointsInput = getOpopIncludeEndpointsNode();
   const imageSmoothingEnabledInput = getOpopImageSmoothingEnabledNode();
   if (
     !stageNode ||
@@ -1172,6 +1187,7 @@ function refreshOpopSettingsUi(): void {
     !whiskerOpacityValue ||
     !normalSearchRadiusInput ||
     !iterationsInput ||
+    !includeEndpointsInput ||
     !imageSmoothingEnabledInput
   ) {
     return;
@@ -1192,6 +1208,7 @@ function refreshOpopSettingsUi(): void {
   whiskerOpacityValue.textContent = `${opopSettings.whiskerOpacityPercent}%`;
   normalSearchRadiusInput.value = opopSettings.normalSearchRadiusPx.toFixed(1);
   iterationsInput.value = String(opopSettings.iterations);
+  includeEndpointsInput.checked = opopSettings.includeEndpoints;
   imageSmoothingEnabledInput.checked = opopSettings.imageSmoothingEnabled;
 
   const disabled = !opopSettings.enabled;
@@ -1202,6 +1219,7 @@ function refreshOpopSettingsUi(): void {
   whiskerOpacityInput.disabled = disabled;
   normalSearchRadiusInput.disabled = disabled;
   iterationsInput.disabled = disabled;
+  includeEndpointsInput.disabled = disabled;
 
   stageNode.classList.toggle("opop-disabled", disabled);
   refreshOpopStageVisibility();
@@ -1217,6 +1235,7 @@ function installOpopUiHandlers(): void {
   const whiskerOpacityInput = getOpopWhiskerOpacityInputNode();
   const normalSearchRadiusInput = getOpopNormalSearchRadiusNode();
   const iterationsInput = getOpopIterationsNode();
+  const includeEndpointsInput = getOpopIncludeEndpointsNode();
   const imageSmoothingEnabledInput = getOpopImageSmoothingEnabledNode();
   if (
     !stageNode ||
@@ -1228,6 +1247,7 @@ function installOpopUiHandlers(): void {
     !whiskerOpacityInput ||
     !normalSearchRadiusInput ||
     !iterationsInput ||
+    !includeEndpointsInput ||
     !imageSmoothingEnabledInput
   ) {
     return;
@@ -1290,6 +1310,9 @@ function installOpopUiHandlers(): void {
     } else {
       refreshOpopSettingsUi();
     }
+  });
+  includeEndpointsInput.addEventListener("change", () => {
+    setOpopSettings({ includeEndpoints: includeEndpointsInput.checked });
   });
   imageSmoothingEnabledInput.addEventListener("change", () => {
     setOpopSettings({ imageSmoothingEnabled: imageSmoothingEnabledInput.checked });
@@ -2916,11 +2939,17 @@ function appendOpopWhiskersForSegment(
   };
 
   if (whiskerCount === 1) {
-    appendAt(0.5);
+    appendAt(opopSettings.includeEndpoints ? 0 : 0.5);
+    return;
+  }
+  if (opopSettings.includeEndpoints) {
+    for (let i = 0; i < whiskerCount; i += 1) {
+      appendAt(i / (whiskerCount - 1));
+    }
     return;
   }
   for (let i = 0; i < whiskerCount; i += 1) {
-    appendAt(i / (whiskerCount - 1));
+    appendAt((i + 1) / (whiskerCount + 1));
   }
 }
 

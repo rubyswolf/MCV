@@ -322,7 +322,7 @@ def main() -> None:
     print()
     print("Build step base command:")
     print(quote_cmd(build_cmd))
-    print("Build target: opencv_js")
+    print("Build target: ALL (includes opencv.js wrapper target)")
 
     if not args.run:
         print()
@@ -351,7 +351,18 @@ def main() -> None:
         env.pop(var, None)
     subprocess.run(cmd, cwd=str(repo_root), check=True, env=env)
 
-    subprocess.run(build_cmd + ["--target", "opencv_js"], cwd=str(repo_root), check=True, env=env)
+    # Build default ALL target so OpenCV JS custom wrapper target also runs.
+    subprocess.run(build_cmd, cwd=str(repo_root), check=True, env=env)
+
+    opencv_js_wrapper = output_dir / "bin" / "opencv.js"
+    opencv_js_module = output_dir / "bin" / "opencv_js.js"
+    if not opencv_js_wrapper.exists():
+        # Some generator/config combinations may skip wrapper generation during ALL.
+        # Try explicit wrapper target, then fall back to module copy as a last resort.
+        subprocess.run(build_cmd + ["--target", "opencv.js"], cwd=str(repo_root), check=False, env=env)
+        if not opencv_js_wrapper.exists() and opencv_js_module.exists():
+            shutil.copyfile(opencv_js_module, opencv_js_wrapper)
+            print("Warning: opencv.js wrapper target was not generated; copied opencv_js.js to opencv.js")
 
 
 if __name__ == "__main__":

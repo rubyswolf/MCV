@@ -197,6 +197,7 @@ def _parse_opop_settings(raw):
     whiskers_per_line = int(round(float(data.get("whiskersPerLine", 128))))
     normal_radius = float(data.get("normalSearchRadiusPx", 2.0))
     iterations = int(round(float(data.get("iterations", 6))))
+    include_endpoints = bool(data.get("includeEndpoints", False))
     return {
         "whiskerMode": whisker_mode,
         "alignmentStrength": _clamp(alignment, 0.0, 5.0),
@@ -205,6 +206,7 @@ def _parse_opop_settings(raw):
         "whiskersPerLine": int(_clamp(whiskers_per_line, 1, 4096)),
         "normalSearchRadiusPx": _clamp(normal_radius, 0.0, 256.0),
         "iterations": int(_clamp(iterations, 1, 64)),
+        "includeEndpoints": include_endpoints,
     }
 
 
@@ -283,10 +285,17 @@ def _opop_refine_line(args):
             "whisker_count": 0,
         }
 
+    include_endpoints = bool(settings.get("includeEndpoints", False))
     if whisker_count == 1:
-        points = np.array([[(ax + bx) * 0.5, (ay + by) * 0.5]], dtype=np.float64)
+        if include_endpoints:
+            points = np.array([[ax, ay]], dtype=np.float64)
+        else:
+            points = np.array([[(ax + bx) * 0.5, (ay + by) * 0.5]], dtype=np.float64)
     else:
-        t = np.linspace(0.0, 1.0, whisker_count, dtype=np.float64)
+        if include_endpoints:
+            t = np.linspace(0.0, 1.0, whisker_count, dtype=np.float64)
+        else:
+            t = np.arange(1, whisker_count + 1, dtype=np.float64) / float(whisker_count + 1)
         points = np.stack([ax + (bx - ax) * t, ay + (by - ay) * t], axis=1)
 
     fallback = base_dir / max(base_length, 1e-12)

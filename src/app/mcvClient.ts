@@ -123,6 +123,7 @@ type McvOpopSettings = {
   whiskersPerLine: number;
   normalSearchRadiusPx: number;
   iterations: number;
+  includeEndpoints?: boolean;
 };
 
 type McvOpopLine = {
@@ -519,14 +520,24 @@ function runWebOpopRefineLine(
   const straightnessGain = clampNumber(settings.straightnessStrength * 0.12, 0, 1.0);
 
   const points: ManualPoint[] = [];
+  const includeEndpoints = Boolean(settings.includeEndpoints);
   if (whiskerCount <= 1) {
-    points.push({
-      x: (ax + bx) * 0.5,
-      y: (ay + by) * 0.5,
-    });
+    points.push(
+      includeEndpoints
+        ? {
+            x: ax,
+            y: ay,
+          }
+        : {
+            x: (ax + bx) * 0.5,
+            y: (ay + by) * 0.5,
+          }
+    );
   } else {
     for (let i = 0; i < whiskerCount; i += 1) {
-      const t = i / (whiskerCount - 1);
+      const t = includeEndpoints
+        ? i / (whiskerCount - 1)
+        : (i + 1) / (whiskerCount + 1);
       points.push({
         x: ax + dx * t,
         y: ay + dy * t,
