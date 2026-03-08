@@ -170,6 +170,21 @@ type OpopSettings = {
   includeEndpoints: boolean;
   imageSmoothingEnabled: boolean;
 };
+type OpopLineAnimation = {
+  axis: ManualAxis;
+  startFrom: ManualPoint;
+  startTo: ManualPoint;
+  targetFrom: ManualPoint;
+  targetTo: ManualPoint;
+  whiskers: McvLineSegment[];
+  points: ManualPoint[];
+  startedAt: number;
+  fadeStartedAt: number | null;
+  overlayOpacity: number;
+  whiskerOpacity: number;
+  slideDurationMs: number;
+  fadeDurationMs: number;
+};
 type StructureVertex = {
   endpointIds: number[];
   point: ManualPoint;
@@ -331,8 +346,9 @@ const opopSettings: OpopSettings = {
   includeEndpoints: false,
   imageSmoothingEnabled: false,
 };
-const opopOptimizedPointsByLine = new Map<number, ManualPoint[]>();
+const opopLineAnimations = new Map<number, OpopLineAnimation>();
 const opopRefineTokenByLine = new Map<number, number>();
+let opopAnimationRafId: number | null = null;
 const MCV_DATA: { annotations: ManualAnnotation[]; structure: StructureData; source?: McvDataSource } = {
   annotations: [],
   structure: {
@@ -742,7 +758,7 @@ function popAnnotationWithStructureUnlink(): ManualAnnotation | undefined {
   const removedIndex = MCV_DATA.structure.lines.length - 1;
   const removed = MCV_DATA.annotations.pop();
   MCV_DATA.structure.lines.pop();
-  opopOptimizedPointsByLine.delete(removedIndex);
+  opopLineAnimations.delete(removedIndex);
   opopRefineTokenByLine.delete(removedIndex);
   MCV_DATA.structure.lines.forEach((line) => {
     line.from.from = line.from.from.filter((value) => value !== removedIndex);
@@ -785,23 +801,32 @@ function rebuildStructureFromAnnotations(): void {
   syncStructureEndpointRefs();
 }
 
+function stopOpopAnimationLoop(): void {
+  if (opopAnimationRafId !== null) {
+    cancelAnimationFrame(opopAnimationRafId);
+    opopAnimationRafId = null;
+  }
+}
+
 function clearOpopOptimizedPoints(): void {
-  opopOptimizedPointsByLine.clear();
+  opopLineAnimations.clear();
   opopRefineTokenByLine.clear();
+  stopOpopAnimationLoop();
+  clearOpopAnimationOverlay();
 }
 
 function remapOpopIndexesAfterLineRemoval(removedLineIndex: number): void {
-  const remappedPoints = new Map<number, ManualPoint[]>();
-  opopOptimizedPointsByLine.forEach((points, lineIndex) => {
+  const remappedAnimations = new Map<number, OpopLineAnimation>();
+  opopLineAnimations.forEach((animation, lineIndex) => {
     if (lineIndex === removedLineIndex) {
       return;
     }
     const nextIndex = lineIndex > removedLineIndex ? lineIndex - 1 : lineIndex;
-    remappedPoints.set(nextIndex, points);
+    remappedAnimations.set(nextIndex, animation);
   });
-  opopOptimizedPointsByLine.clear();
-  remappedPoints.forEach((points, lineIndex) => {
-    opopOptimizedPointsByLine.set(lineIndex, points);
+  opopLineAnimations.clear();
+  remappedAnimations.forEach((animation, lineIndex) => {
+    opopLineAnimations.set(lineIndex, animation);
   });
 
   const remappedTokens = new Map<number, number>();
@@ -869,7 +894,8 @@ async function runPoseSolve(args: McvPoseSolveArgs): Promise<McvPoseSolveResult>
 async function runOpopRefineLine(
   imageDataUrl: string,
   line: { from: ManualPoint; to: ManualPoint },
-  settings: OpopSettings
+  settings: OpopSettings,
+  dragLine?: { from: ManualPoint; to: ManualPoint }
 ): Promise<McvOpopRefineLineResult> {
   return await mcvRuntime.runOpopRefineLine(
     imageDataUrl,
@@ -886,7 +912,13 @@ async function runOpopRefineLine(
       normalSearchRadiusPx: settings.normalSearchRadiusPx,
       iterations: settings.iterations,
       includeEndpoints: settings.includeEndpoints,
-    }
+    },
+    dragLine
+      ? {
+          from: { x: dragLine.from.x, y: dragLine.from.y },
+          to: { x: dragLine.to.x, y: dragLine.to.y },
+        }
+      : undefined
   );
 }
 
@@ -928,6 +960,9 @@ function setOpopSettings(patch: Partial<OpopSettings>): OpopSettings {
     const nextEnabled = Boolean(patch.enabled);
     if (opopSettings.enabled !== nextEnabled) {
       opopSettings.enabled = nextEnabled;
+      if (!nextEnabled) {
+        clearOpopOptimizedPoints();
+      }
       shouldRerender = true;
     }
   }
@@ -2883,74 +2918,104 @@ function getDraftPotentialLinkIndexes(draft: DraftManualLine): Set<number> {
   return potential;
 }
 
-function getOpopWhiskerCountForLine(segment: McvLineSegment): number {
+function getOpopWhiskerCountForLine(segment: McvLineSegment, settings: OpopSettings = opopSettings): number {
   const dx = segment[2] - segment[0];
   const dy = segment[3] - segment[1];
   const lineLength = Math.hypot(dx, dy);
   if (lineLength <= 0) {
     return 0;
   }
-  if (opopSettings.whiskerMode === "per_pixel") {
-    return Math.max(1, Math.round(lineLength / opopSettings.whiskersPerPixel));
+  if (settings.whiskerMode === "per_pixel") {
+    return Math.max(1, Math.round(lineLength / settings.whiskersPerPixel));
   }
-  return Math.max(1, Math.round(opopSettings.whiskersPerLine));
+  return Math.max(1, Math.round(settings.whiskersPerLine));
+}
+
+function getOpopWhiskerTs(whiskerCount: number, includeEndpoints: boolean): number[] {
+  if (whiskerCount <= 0) {
+    return [];
+  }
+  if (whiskerCount === 1) {
+    return [includeEndpoints ? 0 : 0.5];
+  }
+  if (includeEndpoints) {
+    return Array.from({ length: whiskerCount }, (_, i) => i / (whiskerCount - 1));
+  }
+  return Array.from({ length: whiskerCount }, (_, i) => (i + 1) / (whiskerCount + 1));
+}
+
+function buildOpopWhiskerSegmentsForSegment(
+  segment: McvLineSegment,
+  settings: OpopSettings = opopSettings
+): McvLineSegment[] {
+  const dx = segment[2] - segment[0];
+  const dy = segment[3] - segment[1];
+  const lineLength = Math.hypot(dx, dy);
+  if (lineLength <= 0) {
+    return [];
+  }
+  const whiskerCount = getOpopWhiskerCountForLine(segment, settings);
+  if (whiskerCount <= 0) {
+    return [];
+  }
+  const radius = Math.max(0, settings.normalSearchRadiusPx);
+  if (radius <= 0) {
+    return [];
+  }
+  const tangentX = dx / lineLength;
+  const tangentY = dy / lineLength;
+  const normalX = -tangentY;
+  const normalY = tangentX;
+  const ts = getOpopWhiskerTs(whiskerCount, settings.includeEndpoints);
+  return ts.map((t) => {
+    const cx = segment[0] + dx * t;
+    const cy = segment[1] + dy * t;
+    return [
+      cx - normalX * radius,
+      cy - normalY * radius,
+      cx + normalX * radius,
+      cy + normalY * radius,
+    ];
+  });
+}
+
+function projectPointToSegmentLine(point: ManualPoint, segment: McvLineSegment): ManualPoint {
+  const ax = segment[0];
+  const ay = segment[1];
+  const bx = segment[2];
+  const by = segment[3];
+  const dx = bx - ax;
+  const dy = by - ay;
+  const denom = dx * dx + dy * dy;
+  if (denom <= 1e-12) {
+    return { x: ax, y: ay };
+  }
+  const t = clampNumber(((point.x - ax) * dx + (point.y - ay) * dy) / denom, 0, 1);
+  return {
+    x: ax + dx * t,
+    y: ay + dy * t,
+  };
 }
 
 function appendOpopWhiskersForSegment(
   parent: SVGElement,
   segment: McvLineSegment,
   stroke: string,
-  strokeWidth: number
+  strokeWidth: number,
+  settings: OpopSettings = opopSettings,
+  opacityScale = 1
 ): void {
-  if (!opopSettings.enabled) {
+  if (!settings.enabled) {
     return;
   }
-  const dx = segment[2] - segment[0];
-  const dy = segment[3] - segment[1];
-  const lineLength = Math.hypot(dx, dy);
-  if (lineLength <= 0) {
+  const whiskers = buildOpopWhiskerSegmentsForSegment(segment, settings);
+  if (whiskers.length === 0) {
     return;
   }
-  const whiskerCount = getOpopWhiskerCountForLine(segment);
-  if (whiskerCount <= 0) {
-    return;
-  }
-  const radius = Math.max(0, opopSettings.normalSearchRadiusPx);
-  if (radius <= 0) {
-    return;
-  }
-
-  const tangentX = dx / lineLength;
-  const tangentY = dy / lineLength;
-  const normalX = -tangentY;
-  const normalY = tangentX;
-  const opacity = clampNumber(opopSettings.whiskerOpacityPercent / 100, 0, 1);
-
-  const appendAt = (t: number) => {
-    const cx = segment[0] + dx * t;
-    const cy = segment[1] + dy * t;
-    const whisker: McvLineSegment = [
-      cx - normalX * radius,
-      cy - normalY * radius,
-      cx + normalX * radius,
-      cy + normalY * radius,
-    ];
+  const opacity = clampNumber((settings.whiskerOpacityPercent / 100) * opacityScale, 0, 1);
+  whiskers.forEach((whisker) => {
     SvgUtils.appendSvgLine(parent, whisker, stroke, strokeWidth, opacity);
-  };
-
-  if (whiskerCount === 1) {
-    appendAt(opopSettings.includeEndpoints ? 0 : 0.5);
-    return;
-  }
-  if (opopSettings.includeEndpoints) {
-    for (let i = 0; i < whiskerCount; i += 1) {
-      appendAt(i / (whiskerCount - 1));
-    }
-    return;
-  }
-  for (let i = 0; i < whiskerCount; i += 1) {
-    appendAt((i + 1) / (whiskerCount + 1));
-  }
+  });
 }
 
 function captureLineSnapshot(line: ManualAnnotation): ManualAnnotation {
@@ -2972,20 +3037,201 @@ function areLineEndpointsEquivalent(first: ManualAnnotation, second: ManualAnnot
   );
 }
 
+function lerpNumber(start: number, end: number, t: number): number {
+  return start + (end - start) * t;
+}
+
+function easeOutCubic(t: number): number {
+  const clamped = clampNumber(t, 0, 1);
+  return 1 - (1 - clamped) ** 3;
+}
+
+function tickOpopAnimations(now: number): void {
+  opopAnimationRafId = null;
+  if (opopLineAnimations.size === 0) {
+    clearOpopAnimationOverlay();
+    renderCropResultFromCache();
+    return;
+  }
+
+  let committedLine = false;
+  opopLineAnimations.forEach((animation, lineIndex) => {
+    const line = MCV_DATA.annotations[lineIndex];
+    if (!line) {
+      opopLineAnimations.delete(lineIndex);
+      return;
+    }
+    const slideElapsed = now - animation.startedAt;
+    if (slideElapsed >= animation.slideDurationMs && animation.fadeStartedAt === null) {
+      line.from = { x: animation.targetFrom.x, y: animation.targetFrom.y };
+      line.to = { x: animation.targetTo.x, y: animation.targetTo.y };
+      const structureLine = MCV_DATA.structure.lines[lineIndex];
+      if (structureLine) {
+        structureLine.from.x = animation.targetFrom.x;
+        structureLine.from.y = animation.targetFrom.y;
+        structureLine.to.x = animation.targetTo.x;
+        structureLine.to.y = animation.targetTo.y;
+      }
+      animation.fadeStartedAt = now;
+      animation.overlayOpacity = 1;
+      committedLine = true;
+    } else if (animation.fadeStartedAt !== null) {
+      const fadeElapsed = now - animation.fadeStartedAt;
+      animation.overlayOpacity = clampNumber(1 - fadeElapsed / animation.fadeDurationMs, 0, 1);
+      if (animation.overlayOpacity <= 0) {
+        opopLineAnimations.delete(lineIndex);
+      }
+    }
+  });
+
+  if (committedLine) {
+    markAnnotationsDirty();
+    // Rebuild once at slide-complete so base SVG line is present during fade phase.
+    renderCropResultFromCache();
+  }
+
+  renderOpopAnimationOverlay(now);
+  if (opopLineAnimations.size > 0) {
+    opopAnimationRafId = requestAnimationFrame(tickOpopAnimations);
+  } else if (committedLine) {
+    clearOpopAnimationOverlay();
+  } else {
+    clearOpopAnimationOverlay();
+  }
+}
+
+function startOpopAnimationLoop(): void {
+  if (opopAnimationRafId !== null || opopLineAnimations.size === 0) {
+    return;
+  }
+  opopAnimationRafId = requestAnimationFrame(tickOpopAnimations);
+}
+
+function startOpopLineAnimation(
+  lineIndex: number,
+  sourceLine: ManualAnnotation,
+  targetFrom: ManualPoint,
+  targetTo: ManualPoint,
+  optimizedPoints: ManualPoint[],
+  settingsSnapshot: OpopSettings
+): void {
+  const sourceSegment = SvgUtils.getLineSegmentForLine(sourceLine);
+  const whiskers = buildOpopWhiskerSegmentsForSegment(sourceSegment, settingsSnapshot);
+  const projectedPoints = optimizedPoints.map((point, index) => {
+    const whisker = whiskers[index];
+    return whisker ? projectPointToSegmentLine(point, whisker) : { x: point.x, y: point.y };
+  });
+
+  opopLineAnimations.set(lineIndex, {
+    axis: sourceLine.axis,
+    startFrom: { x: sourceLine.from.x, y: sourceLine.from.y },
+    startTo: { x: sourceLine.to.x, y: sourceLine.to.y },
+    targetFrom: { x: targetFrom.x, y: targetFrom.y },
+    targetTo: { x: targetTo.x, y: targetTo.y },
+    whiskers,
+    points: projectedPoints,
+    startedAt: performance.now(),
+    fadeStartedAt: null,
+    overlayOpacity: 1,
+    whiskerOpacity: clampNumber(settingsSnapshot.whiskerOpacityPercent / 100, 0, 1),
+    slideDurationMs: 480,
+    fadeDurationMs: 520,
+  });
+  renderCropResultFromCache();
+  startOpopAnimationLoop();
+}
+
+function getOrCreateOpopOverlayGroup(svg: SVGSVGElement): SVGGElement | null {
+  const sceneGroup = svg.querySelector('[data-role="viewer-scene"]') as SVGGElement | null;
+  if (!sceneGroup) {
+    return null;
+  }
+  let overlay = sceneGroup.querySelector('[data-role="opop-animation-overlay"]') as SVGGElement | null;
+  if (overlay) {
+    return overlay;
+  }
+  const svgNs = "http://www.w3.org/2000/svg";
+  overlay = document.createElementNS(svgNs, "g");
+  overlay.setAttribute("data-role", "opop-animation-overlay");
+  sceneGroup.appendChild(overlay);
+  return overlay;
+}
+
+function clearOpopAnimationOverlay(): void {
+  const svg = getViewerCropResultSvgNode();
+  if (!svg) {
+    return;
+  }
+  const overlay = svg.querySelector('[data-role="opop-animation-overlay"]') as SVGGElement | null;
+  if (!overlay) {
+    return;
+  }
+  overlay.replaceChildren();
+}
+
+function renderOpopAnimationOverlay(now: number): void {
+  const svg = getViewerCropResultSvgNode();
+  if (!svg) {
+    return;
+  }
+  const overlay = getOrCreateOpopOverlayGroup(svg);
+  if (!overlay) {
+    return;
+  }
+  overlay.replaceChildren();
+  const opopDotRadius = Math.max(0.25, 0.55 / Math.max(0.01, viewerMotion.zoom));
+
+  opopLineAnimations.forEach((animation) => {
+    const slideElapsed = now - animation.startedAt;
+    const slideT = easeOutCubic(slideElapsed / animation.slideDurationMs);
+    const fromPoint = {
+      x: lerpNumber(animation.startFrom.x, animation.targetFrom.x, slideT),
+      y: lerpNumber(animation.startFrom.y, animation.targetFrom.y, slideT),
+    };
+    const toPoint = {
+      x: lerpNumber(animation.startTo.x, animation.targetTo.x, slideT),
+      y: lerpNumber(animation.startTo.y, animation.targetTo.y, slideT),
+    };
+    const axisColor = SvgUtils.getAxisColor(animation.axis);
+    SvgUtils.appendSvgLine(
+      overlay,
+      [fromPoint.x, fromPoint.y, toPoint.x, toPoint.y],
+      axisColor,
+      2,
+      1,
+      SvgUtils.getAxisMarkerId(animation.axis)
+    );
+    animation.whiskers.forEach((segment) => {
+      SvgUtils.appendSvgLine(
+        overlay,
+        segment,
+        axisColor,
+        2,
+        clampNumber(animation.whiskerOpacity * animation.overlayOpacity, 0, 1)
+      );
+    });
+    animation.points.forEach((point) => {
+      SvgUtils.appendSvgPointDot(overlay, point, "#ffffff", opopDotRadius, animation.overlayOpacity);
+    });
+  });
+}
+
 async function runOpopRefineForLine(
   lineIndex: number,
   sourceLine: ManualAnnotation,
   sourceImageDataUrl: string,
-  settingsSnapshot: OpopSettings
+  settingsSnapshot: OpopSettings,
+  dragLine?: { from: ManualPoint; to: ManualPoint }
 ): Promise<void> {
   if (!settingsSnapshot.enabled) {
-    opopOptimizedPointsByLine.delete(lineIndex);
+    opopLineAnimations.delete(lineIndex);
+    renderOpopAnimationOverlay(performance.now());
     return;
   }
   const nextToken = (opopRefineTokenByLine.get(lineIndex) ?? 0) + 1;
   opopRefineTokenByLine.set(lineIndex, nextToken);
   try {
-    const result = await runOpopRefineLine(sourceImageDataUrl, sourceLine, settingsSnapshot);
+    const result = await runOpopRefineLine(sourceImageDataUrl, sourceLine, settingsSnapshot, dragLine);
     if (opopRefineTokenByLine.get(lineIndex) !== nextToken) {
       return;
     }
@@ -2993,26 +3239,25 @@ async function runOpopRefineForLine(
     if (!current || !areLineEndpointsEquivalent(current, sourceLine)) {
       return;
     }
-
-    current.from = { x: result.from.x, y: result.from.y };
-    current.to = { x: result.to.x, y: result.to.y };
-    opopOptimizedPointsByLine.set(
+    const safePoints = Array.isArray(result.points)
+      ? result.points
+          .filter((point) => Number.isFinite(point.x) && Number.isFinite(point.y))
+          .map((point) => ({ x: point.x, y: point.y }))
+      : [];
+    startOpopLineAnimation(
       lineIndex,
-      Array.isArray(result.points)
-        ? result.points
-            .filter((point) => Number.isFinite(point.x) && Number.isFinite(point.y))
-            .map((point) => ({ x: point.x, y: point.y }))
-        : []
+      sourceLine,
+      { x: result.from.x, y: result.from.y },
+      { x: result.to.x, y: result.to.y },
+      safePoints,
+      settingsSnapshot
     );
-
-    rebuildStructureFromAnnotations();
-    markAnnotationsDirty();
     renderCropResultFromCache();
   } catch {
     if (opopRefineTokenByLine.get(lineIndex) !== nextToken) {
       return;
     }
-    opopOptimizedPointsByLine.delete(lineIndex);
+    opopLineAnimations.delete(lineIndex);
     renderCropResultFromCache();
   }
 }
@@ -3074,10 +3319,11 @@ function createManualModeCropResultSvg(
       const axisColor = SvgUtils.getAxisColor(sourceLine.axis);
       const segment: McvLineSegment = [line.from.x, line.from.y, line.to.x, line.to.y];
       SvgUtils.appendSvgLine(sceneGroup, segment, axisColor, 2.2, 1);
-      appendOpopWhiskersForSegment(sceneGroup, segment, axisColor, 2.2);
     });
   } else {
     linesToRender.forEach((line, index) => {
+      const opopAnimation = opopLineAnimations.get(index) ?? null;
+      const hideBaseLineForOpop = Boolean(opopAnimation && opopAnimation.fadeStartedAt === null);
       const editHighlighted =
         editMode && (manualEditHoveredLineIndex === index || manualEditSelectedLineIndex === index);
       const axisColor =
@@ -3091,29 +3337,19 @@ function createManualModeCropResultSvg(
             ? SvgUtils.getAxisLightColor(line.axis)
             : SvgUtils.getAxisColor(line.axis);
       const segment = SvgUtils.getLineSegmentForLine(line);
-      SvgUtils.appendSvgLine(
-        sceneGroup,
-        segment,
-        axisColor,
-        2,
-        1,
-        anchorMode || vertexSolveMode ? undefined : SvgUtils.getAxisMarkerId(line.axis)
-      );
-      appendOpopWhiskersForSegment(sceneGroup, segment, axisColor, 2);
-      if (!anchorMode && !vertexSolveMode) {
+      if (!hideBaseLineForOpop) {
+        SvgUtils.appendSvgLine(
+          sceneGroup,
+          segment,
+          axisColor,
+          2,
+          1,
+          anchorMode || vertexSolveMode ? undefined : SvgUtils.getAxisMarkerId(line.axis)
+        );
+      }
+      if (!hideBaseLineForOpop && !anchorMode && !vertexSolveMode) {
         SvgUtils.appendSvgLineLabel(sceneGroup, segment, line.length, axisColor);
       }
-    });
-  }
-  if (opopSettings.enabled && !reprojectMode) {
-    const opopDotRadius = Math.max(0.3, 0.7 / Math.max(0.01, viewerMotion.zoom));
-    opopOptimizedPointsByLine.forEach((points, lineIndex) => {
-      if (!MCV_DATA.annotations[lineIndex] || !Array.isArray(points)) {
-        return;
-      }
-      points.forEach((point) => {
-        SvgUtils.appendSvgPointDot(sceneGroup, point, "#ffffff", opopDotRadius);
-      });
     });
   }
   if (!anchorMode && !vertexSolveMode && !reprojectMode && manualDraftLine) {
@@ -3506,7 +3742,11 @@ function finalizeManualDraftFromPointer(pointer: PointerEvent): void {
       const sourceImageDataUrl = cropResultCache.colorDataUrl;
       const sourceLine = captureLineSnapshot(newLine);
       const settingsSnapshot = getOpopSettings();
-      void runOpopRefineForLine(newLineIndex, sourceLine, sourceImageDataUrl, settingsSnapshot);
+      const dragLine = {
+        from: { x: committedFrom.x, y: committedFrom.y },
+        to: { x: committedTo.x, y: committedTo.y },
+      };
+      void runOpopRefineForLine(newLineIndex, sourceLine, sourceImageDataUrl, settingsSnapshot, dragLine);
     }
     manualRedoLines.length = 0;
   }

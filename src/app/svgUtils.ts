@@ -121,7 +121,8 @@ export function appendSvgPointDot(
   parent: SVGElement,
   point: ManualPoint,
   color: string,
-  radius: number
+  radius: number,
+  opacity = 1
 ): void {
   const svgNs = "http://www.w3.org/2000/svg";
   const circle = document.createElementNS(svgNs, "circle");
@@ -132,6 +133,7 @@ export function appendSvgPointDot(
   circle.setAttribute("stroke", "#111821");
   circle.setAttribute("stroke-width", "0.8");
   circle.setAttribute("vector-effect", "non-scaling-stroke");
+  circle.setAttribute("opacity", String(opacity));
   parent.appendChild(circle);
 }
 

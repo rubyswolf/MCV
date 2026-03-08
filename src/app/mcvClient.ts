@@ -135,6 +135,7 @@ type McvOpopRefineLineArgs = {
   session_id: string;
   cache_key: string;
   line: McvOpopLine;
+  drag_line?: McvOpopLine;
   settings: McvOpopSettings;
 };
 
@@ -170,7 +171,8 @@ type McvClientRuntime = {
   runOpopRefineLine: (
     imageDataUrl: string,
     line: McvOpopLine,
-    settings: McvOpopSettings
+    settings: McvOpopSettings,
+    dragLine?: McvOpopLine
   ) => Promise<McvOpopRefineLineResult>;
   prepareSobelCache: (imageDataUrl: string) => Promise<void>;
   clearSobelCache: (reason?: "viewer_exit" | "unload") => Promise<void>;
@@ -491,7 +493,8 @@ function computeDirectionalEdgeScore(
 function runWebOpopRefineLine(
   sobelEntry: McvWebSobelCacheEntry,
   line: McvOpopLine,
-  settings: McvOpopSettings
+  settings: McvOpopSettings,
+  dragLine?: McvOpopLine
 ): McvOpopRefineLineResult {
   const ax = Number(line.from?.x);
   const ay = Number(line.from?.y);
@@ -500,6 +503,11 @@ function runWebOpopRefineLine(
   if (![ax, ay, bx, by].every((value) => Number.isFinite(value))) {
     throw new Error("line.from and line.to must be finite points");
   }
+  const dragAx = Number(dragLine?.from?.x);
+  const dragAy = Number(dragLine?.from?.y);
+  const dragBx = Number(dragLine?.to?.x);
+  const dragBy = Number(dragLine?.to?.y);
+  const hasDragLine = [dragAx, dragAy, dragBx, dragBy].every((value) => Number.isFinite(value));
 
   const dx = bx - ax;
   const dy = by - ay;
@@ -607,28 +615,47 @@ function runWebOpopRefineLine(
 
   const finalFit = fitPrincipalLineDirection(points, fallbackDir);
   const lineDir = finalFit.direction;
-  let minScalar = Number.POSITIVE_INFINITY;
-  let maxScalar = Number.NEGATIVE_INFINITY;
-  for (let i = 0; i < points.length; i += 1) {
-    const scalar =
-      (points[i].x - finalFit.center.x) * lineDir.x +
-      (points[i].y - finalFit.center.y) * lineDir.y;
-    if (scalar < minScalar) {
-      minScalar = scalar;
+  let fromPoint: ManualPoint;
+  let toPoint: ManualPoint;
+  if (includeEndpoints) {
+    // Preserve endpoint span by projecting original drag endpoints onto the fitted line.
+    const sourceAx = hasDragLine ? dragAx : ax;
+    const sourceAy = hasDragLine ? dragAy : ay;
+    const sourceBx = hasDragLine ? dragBx : bx;
+    const sourceBy = hasDragLine ? dragBy : by;
+    const scalarA = (sourceAx - finalFit.center.x) * lineDir.x + (sourceAy - finalFit.center.y) * lineDir.y;
+    const scalarB = (sourceBx - finalFit.center.x) * lineDir.x + (sourceBy - finalFit.center.y) * lineDir.y;
+    fromPoint = {
+      x: finalFit.center.x + lineDir.x * scalarA,
+      y: finalFit.center.y + lineDir.y * scalarA,
+    };
+    toPoint = {
+      x: finalFit.center.x + lineDir.x * scalarB,
+      y: finalFit.center.y + lineDir.y * scalarB,
+    };
+  } else {
+    let minScalar = Number.POSITIVE_INFINITY;
+    let maxScalar = Number.NEGATIVE_INFINITY;
+    for (let i = 0; i < points.length; i += 1) {
+      const scalar =
+        (points[i].x - finalFit.center.x) * lineDir.x +
+        (points[i].y - finalFit.center.y) * lineDir.y;
+      if (scalar < minScalar) {
+        minScalar = scalar;
+      }
+      if (scalar > maxScalar) {
+        maxScalar = scalar;
+      }
     }
-    if (scalar > maxScalar) {
-      maxScalar = scalar;
-    }
+    fromPoint = {
+      x: finalFit.center.x + lineDir.x * minScalar,
+      y: finalFit.center.y + lineDir.y * minScalar,
+    };
+    toPoint = {
+      x: finalFit.center.x + lineDir.x * maxScalar,
+      y: finalFit.center.y + lineDir.y * maxScalar,
+    };
   }
-
-  let fromPoint: ManualPoint = {
-    x: finalFit.center.x + lineDir.x * minScalar,
-    y: finalFit.center.y + lineDir.y * minScalar,
-  };
-  let toPoint: ManualPoint = {
-    x: finalFit.center.x + lineDir.x * maxScalar,
-    y: finalFit.center.y + lineDir.y * maxScalar,
-  };
 
   const originalDir = { x: dx, y: dy };
   const refinedDir = { x: toPoint.x - fromPoint.x, y: toPoint.y - fromPoint.y };
@@ -640,15 +667,21 @@ function runWebOpopRefineLine(
 
   const width = sobelEntry.width;
   const height = sobelEntry.height;
-  const clampPoint = (point: ManualPoint): ManualPoint => ({
+  const clampSamplePoint = (point: ManualPoint): ManualPoint => ({
     x: clampNumber(point.x, 0, Math.max(0, width - 1)),
     y: clampNumber(point.y, 0, Math.max(0, height - 1)),
   });
 
   return {
-    from: clampPoint(fromPoint),
-    to: clampPoint(toPoint),
-    points: points.map((point) => clampPoint(point)),
+    from: {
+      x: Number(fromPoint.x),
+      y: Number(fromPoint.y),
+    },
+    to: {
+      x: Number(toPoint.x),
+      y: Number(toPoint.y),
+    },
+    points: points.map((point) => clampSamplePoint(point)),
     whisker_count: whiskerCount,
   };
 }
@@ -1336,7 +1369,8 @@ export function createMcvClient(config: McvClientConfig): McvClientRuntime {
   async function runOpopRefineLine(
     imageDataUrl: string,
     line: McvOpopLine,
-    settings: McvOpopSettings
+    settings: McvOpopSettings,
+    dragLine?: McvOpopLine
   ): Promise<McvOpopRefineLineResult> {
     if (typeof imageDataUrl !== "string" || !imageDataUrl.trim()) {
       throw new Error("image_data_url is required");
@@ -1348,7 +1382,7 @@ export function createMcvClient(config: McvClientConfig): McvClientRuntime {
         sobelEntry = await computeColorSobelWeb(getWebMcvRuntime, imageDataUrl);
         webSobelCache.set(cacheKey, sobelEntry);
       }
-      return runWebOpopRefineLine(sobelEntry, line, settings);
+      return runWebOpopRefineLine(sobelEntry, line, settings, dragLine);
     }
 
     const response = await callMcvApi<McvOpopRefineLineResult>({
@@ -1357,6 +1391,7 @@ export function createMcvClient(config: McvClientConfig): McvClientRuntime {
         session_id: sobelSessionId,
         cache_key: cacheKey,
         line,
+        ...(dragLine ? { drag_line: dragLine } : {}),
         settings,
       } satisfies McvOpopRefineLineArgs,
     });

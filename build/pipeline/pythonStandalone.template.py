@@ -265,6 +265,33 @@ def _opop_refine_line(args):
     if not (np.isfinite(ax) and np.isfinite(ay) and np.isfinite(bx) and np.isfinite(by)):
         raise ValueError("line endpoints must be finite")
 
+    drag_line = args.get("drag_line")
+    drag_ax = ax
+    drag_ay = ay
+    drag_bx = bx
+    drag_by = by
+    if isinstance(drag_line, dict):
+        drag_from = drag_line.get("from")
+        drag_to = drag_line.get("to")
+        if isinstance(drag_from, dict) and isinstance(drag_to, dict):
+            try:
+                raw_drag_ax = float(drag_from.get("x"))
+                raw_drag_ay = float(drag_from.get("y"))
+                raw_drag_bx = float(drag_to.get("x"))
+                raw_drag_by = float(drag_to.get("y"))
+                if (
+                    np.isfinite(raw_drag_ax)
+                    and np.isfinite(raw_drag_ay)
+                    and np.isfinite(raw_drag_bx)
+                    and np.isfinite(raw_drag_by)
+                ):
+                    drag_ax = raw_drag_ax
+                    drag_ay = raw_drag_ay
+                    drag_bx = raw_drag_bx
+                    drag_by = raw_drag_by
+            except Exception:
+                pass
+
     settings = _parse_opop_settings(args.get("settings"))
     base_dir = np.array([bx - ax, by - ay], dtype=np.float64)
     base_length = float(np.linalg.norm(base_dir))
@@ -342,20 +369,23 @@ def _opop_refine_line(args):
             points = points + straightness_gain * (projected - points)
 
     center, direction = _fit_principal_line(points, fallback)
-    scalars = (points - center) @ direction
-    s_min = float(np.min(scalars))
-    s_max = float(np.max(scalars))
-    refined_from = center + direction * s_min
-    refined_to = center + direction * s_max
+    if include_endpoints:
+        # Preserve endpoint span by projecting original drag endpoints onto the fitted line.
+        s_a = float(np.dot(np.array([drag_ax, drag_ay], dtype=np.float64) - center, direction))
+        s_b = float(np.dot(np.array([drag_bx, drag_by], dtype=np.float64) - center, direction))
+        refined_from = center + direction * s_a
+        refined_to = center + direction * s_b
+    else:
+        scalars = (points - center) @ direction
+        s_min = float(np.min(scalars))
+        s_max = float(np.max(scalars))
+        refined_from = center + direction * s_min
+        refined_to = center + direction * s_max
     if float(np.dot(refined_to - refined_from, base_dir)) < 0.0:
         refined_from, refined_to = refined_to, refined_from
 
     points[:, 0] = np.clip(points[:, 0], 0.0, max(0.0, float(width - 1)))
     points[:, 1] = np.clip(points[:, 1], 0.0, max(0.0, float(height - 1)))
-    refined_from[0] = _clamp(float(refined_from[0]), 0.0, max(0.0, float(width - 1)))
-    refined_from[1] = _clamp(float(refined_from[1]), 0.0, max(0.0, float(height - 1)))
-    refined_to[0] = _clamp(float(refined_to[0]), 0.0, max(0.0, float(width - 1)))
-    refined_to[1] = _clamp(float(refined_to[1]), 0.0, max(0.0, float(height - 1)))
 
     return {
         "from": {"x": float(refined_from[0]), "y": float(refined_from[1])},
