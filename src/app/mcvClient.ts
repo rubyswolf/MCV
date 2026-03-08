@@ -615,47 +615,21 @@ function runWebOpopRefineLine(
 
   const finalFit = fitPrincipalLineDirection(points, fallbackDir);
   const lineDir = finalFit.direction;
-  let fromPoint: ManualPoint;
-  let toPoint: ManualPoint;
-  if (includeEndpoints) {
-    // Preserve endpoint span by projecting original drag endpoints onto the fitted line.
-    const sourceAx = hasDragLine ? dragAx : ax;
-    const sourceAy = hasDragLine ? dragAy : ay;
-    const sourceBx = hasDragLine ? dragBx : bx;
-    const sourceBy = hasDragLine ? dragBy : by;
-    const scalarA = (sourceAx - finalFit.center.x) * lineDir.x + (sourceAy - finalFit.center.y) * lineDir.y;
-    const scalarB = (sourceBx - finalFit.center.x) * lineDir.x + (sourceBy - finalFit.center.y) * lineDir.y;
-    fromPoint = {
-      x: finalFit.center.x + lineDir.x * scalarA,
-      y: finalFit.center.y + lineDir.y * scalarA,
-    };
-    toPoint = {
-      x: finalFit.center.x + lineDir.x * scalarB,
-      y: finalFit.center.y + lineDir.y * scalarB,
-    };
-  } else {
-    let minScalar = Number.POSITIVE_INFINITY;
-    let maxScalar = Number.NEGATIVE_INFINITY;
-    for (let i = 0; i < points.length; i += 1) {
-      const scalar =
-        (points[i].x - finalFit.center.x) * lineDir.x +
-        (points[i].y - finalFit.center.y) * lineDir.y;
-      if (scalar < minScalar) {
-        minScalar = scalar;
-      }
-      if (scalar > maxScalar) {
-        maxScalar = scalar;
-      }
-    }
-    fromPoint = {
-      x: finalFit.center.x + lineDir.x * minScalar,
-      y: finalFit.center.y + lineDir.y * minScalar,
-    };
-    toPoint = {
-      x: finalFit.center.x + lineDir.x * maxScalar,
-      y: finalFit.center.y + lineDir.y * maxScalar,
-    };
-  }
+  // Preserve endpoint span by projecting original drag endpoints onto the fitted line.
+  const sourceAx = hasDragLine ? dragAx : ax;
+  const sourceAy = hasDragLine ? dragAy : ay;
+  const sourceBx = hasDragLine ? dragBx : bx;
+  const sourceBy = hasDragLine ? dragBy : by;
+  const scalarA = (sourceAx - finalFit.center.x) * lineDir.x + (sourceAy - finalFit.center.y) * lineDir.y;
+  const scalarB = (sourceBx - finalFit.center.x) * lineDir.x + (sourceBy - finalFit.center.y) * lineDir.y;
+  let fromPoint: ManualPoint = {
+    x: finalFit.center.x + lineDir.x * scalarA,
+    y: finalFit.center.y + lineDir.y * scalarA,
+  };
+  let toPoint: ManualPoint = {
+    x: finalFit.center.x + lineDir.x * scalarB,
+    y: finalFit.center.y + lineDir.y * scalarB,
+  };
 
   const originalDir = { x: dx, y: dy };
   const refinedDir = { x: toPoint.x - fromPoint.x, y: toPoint.y - fromPoint.y };

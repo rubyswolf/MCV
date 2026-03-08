@@ -369,18 +369,11 @@ def _opop_refine_line(args):
             points = points + straightness_gain * (projected - points)
 
     center, direction = _fit_principal_line(points, fallback)
-    if include_endpoints:
-        # Preserve endpoint span by projecting original drag endpoints onto the fitted line.
-        s_a = float(np.dot(np.array([drag_ax, drag_ay], dtype=np.float64) - center, direction))
-        s_b = float(np.dot(np.array([drag_bx, drag_by], dtype=np.float64) - center, direction))
-        refined_from = center + direction * s_a
-        refined_to = center + direction * s_b
-    else:
-        scalars = (points - center) @ direction
-        s_min = float(np.min(scalars))
-        s_max = float(np.max(scalars))
-        refined_from = center + direction * s_min
-        refined_to = center + direction * s_max
+    # Preserve endpoint span by projecting original drag endpoints onto the fitted line.
+    s_a = float(np.dot(np.array([drag_ax, drag_ay], dtype=np.float64) - center, direction))
+    s_b = float(np.dot(np.array([drag_bx, drag_by], dtype=np.float64) - center, direction))
+    refined_from = center + direction * s_a
+    refined_to = center + direction * s_b
     if float(np.dot(refined_to - refined_from, base_dir)) < 0.0:
         refined_from, refined_to = refined_to, refined_from
 
