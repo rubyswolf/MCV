@@ -155,7 +155,54 @@ If no line is selected:
 
 - `1/2/3/Q/W/E` exits edit mode to draw mode and sets axis.
 
-## 7. Anchor mode controls (`A`)
+## 7. Optical Optimizer (OPOP)
+
+OPOP refines drawn lines using directional Sobel-based edge attraction plus straight-line regularization.
+
+When it runs:
+
+- After you release a newly drawn line (in draw mode), if OPOP is enabled.
+- Refinement uses per-image Sobel caches:
+  - Web target: cache in browser runtime.
+  - Python target: cache in backend session.
+- Cache is cleared on viewer exit/back and unload.
+
+UI location:
+
+- `Optical Optimisation` card under the media title section and above the annotation canvas.
+
+Controls in that card:
+
+- `Enabled` checkbox: master on/off.
+- `Alignment strength`: how strongly points move toward detected edge response.
+- `Straightness strength`: how strongly points are projected toward a best-fit line.
+- `Whisker mode`:
+  - `Pixels per whisker` (spacing-based), or
+  - `Whiskers per line` (fixed count).
+- `Whisker opacity`: overlay opacity for whiskers.
+- `Normal search radius (px)`: whisker half-length / search distance from line (default `2px`).
+- `Iterations`: number of optimizer update passes.
+- `Include endpoints`: allows whiskers exactly at line endpoints when enabled.
+- `Image smoothing`: toggles image rendering from pixelated (default off) to smooth interpolation.
+
+Preview keys/layers:
+
+- Hold backquote (`` ` ``): preview OPOP layer.
+- Hold backquote + `Shift` (either key order): preview original annotation layer.
+- Default render uses solved `structure` lines, built from OPOP where available and raw annotations as fallback.
+
+Shift-drag no-go masking (new):
+
+- While actively drawing a line, holding `Shift` paints no-go sections along the current line span.
+- Whiskers are not spawned in those sections during the initial OPOP solve.
+- Multiple separated no-go sections are supported in one draw.
+- Tape-measure behavior:
+  - Extending while holding `Shift` adds masked span.
+  - Rotating without changing length keeps existing mask placement along the span.
+  - Retracting trims mask from the tip side.
+  - Retracted mask does not come back unless repainted by extending with `Shift` again.
+
+## 8. Anchor mode controls (`A`)
 
 Anchor mode purpose:
 
@@ -187,7 +234,7 @@ Coordinate mapping:
 - `(1, 2)` <-> `x=1, y=2`
 - `(1, 2, 3)` <-> `x=1, y=2, z=3`
 
-## 8. Vertex solve mode (`S`)
+## 9. Vertex solve mode (`S`)
 
 What it does:
 
@@ -211,7 +258,7 @@ Important:
 - Exiting solve mode purges generated non-anchor vertices.
 - Anchor-linked vertices are preserved.
 
-## 9. Pose solve mode (`D`)
+## 10. Pose solve mode (`D`)
 
 Enter with:
 
@@ -231,7 +278,7 @@ Behavior:
 - Includes reference input `x y z yaw pitch` with live error stats.
 - Press `D` again in pose solve mode to rerun solve.
 
-## 10. View navigation (pan/zoom)
+## 11. View navigation (pan/zoom)
 
 General behavior:
 
@@ -253,7 +300,7 @@ Reset behavior:
 
 - Resize window re-renders current view with fit sizing.
 
-## 11. Structure and snapping behavior
+## 12. Structure and snapping behavior
 
 MCV maintains two related line sets:
 
@@ -272,16 +319,15 @@ Geometry refinement:
 - 2-line component: infinite-line intersection (fallback to least squares).
 - 3+ lines: least-squares intersection point.
 - Structure endpoints in the component snap to that solved point.
-- Holding backquote (`` ` ``) temporarily shows raw `annotations` instead of `structure`.
 
-## 12. Save and load state (SVG)
+## 13. Save and load state (SVG)
 
 Save:
 
 - `Ctrl+S` exports `<title>_state.svg`.
 - Includes:
   - Embedded base image.
-  - Inkscape layers: `base`, `annotation`, `structure`, `anchors`, and optional `vertices`.
+  - Inkscape layers: `base`, `annotations`, `opop`, `structure`, `anchors`, and optional `vertices`.
   - JSON state in `<script id="mcv-data" type="application/json">...</script>`.
 
 Vertices layer export condition:
@@ -295,7 +341,7 @@ Load:
   - `MCV_DATA` annotations/structure/source
 - If source is video and resolvable via Media API, the full video panel is mounted above the image and seeks to saved timestamp.
 
-## 13. URL launch parameters
+## 14. URL launch parameters
 
 Supported query parameters:
 
@@ -312,7 +358,7 @@ Notes:
 - `id` is preferred over `yt` when building share links.
 - `f` is interpreted using detected FPS (fallback 30 when FPS is not yet known).
 
-## 14. Console APIs
+## 15. Console APIs
 
 Global objects:
 
@@ -329,11 +375,17 @@ Global objects:
 - `MCV_API.mcv.call(...)`
 - `MCV_API.mcv.runImagePipeline(...)` (exposed, currently not used by UI flow)
 - `MCV_API.mcv.runPoseSolve(...)`
+- `MCV_API.mcv.runOpopRefineLine(...)`
+- `MCV_API.mcv.prepareSobelCache(...)`
+- `MCV_API.mcv.clearSobelCache(...)`
+- `MCV_API.mcv.opop.getSettings()`
+- `MCV_API.mcv.opop.setSettings(...)`
 - `MCV_API.mcv.backend` (`"web"` or `"python"`)
 
 `MCV_DATA` shape:
 
 - `annotations: Array<{ from:{x,y}, to:{x,y}, axis:'x'|'y'|'z', length?:number }>`
+- `opop: Array<({ from:{x,y}, to:{x,y}, axis:'x'|'y'|'z', length?:number } | null)>`
 - `structure:`
   - `lines: Array<{ from:{x,y,from[],to[],anchor?,vertex?}, to:{...}, axis, length? }>`
   - `anchors: Array<{ from:number[], to:number[], vertex:number, x?,y?,z? }>`
