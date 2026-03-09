@@ -218,6 +218,37 @@ def _compute_opop_whisker_count(line_length, settings):
     return max(1, int(round(settings["whiskersPerLine"])))
 
 
+def _parse_opop_exclude_ranges(raw):
+    out = []
+    if not isinstance(raw, list):
+        return out
+    for entry in raw:
+        if not isinstance(entry, dict):
+            continue
+        try:
+            start_t = float(entry.get("start_t"))
+            end_t = float(entry.get("end_t"))
+        except Exception:
+            continue
+        if not (np.isfinite(start_t) and np.isfinite(end_t)):
+            continue
+        lo = max(0.0, min(1.0, min(start_t, end_t)))
+        hi = max(0.0, min(1.0, max(start_t, end_t)))
+        if hi - lo <= 1e-6:
+            continue
+        out.append((lo, hi))
+    if not out:
+        return out
+    out.sort(key=lambda item: item[0])
+    merged = []
+    for lo, hi in out:
+        if not merged or lo > merged[-1][1] + 1e-6:
+            merged.append([lo, hi])
+        else:
+            merged[-1][1] = max(merged[-1][1], hi)
+    return [(float(item[0]), float(item[1])) for item in merged]
+
+
 def _opop_refine_line(args):
     if not isinstance(args, dict):
         raise ValueError("args must be an object")
@@ -315,15 +346,28 @@ def _opop_refine_line(args):
     include_endpoints = bool(settings.get("includeEndpoints", False))
     if whisker_count == 1:
         if include_endpoints:
-            points = np.array([[ax, ay]], dtype=np.float64)
+            t = np.array([0.0], dtype=np.float64)
         else:
-            points = np.array([[(ax + bx) * 0.5, (ay + by) * 0.5]], dtype=np.float64)
+            t = np.array([0.5], dtype=np.float64)
     else:
         if include_endpoints:
             t = np.linspace(0.0, 1.0, whisker_count, dtype=np.float64)
         else:
             t = np.arange(1, whisker_count + 1, dtype=np.float64) / float(whisker_count + 1)
-        points = np.stack([ax + (bx - ax) * t, ay + (by - ay) * t], axis=1)
+    exclude_ranges = _parse_opop_exclude_ranges(args.get("exclude_ranges"))
+    if exclude_ranges and t.size > 0:
+        keep_mask = np.ones(t.shape[0], dtype=bool)
+        for start_t, end_t in exclude_ranges:
+            keep_mask &= np.logical_or(t < (start_t - 1e-6), t > (end_t + 1e-6))
+        t = t[keep_mask]
+    if t.size == 0:
+        return {
+            "from": {"x": float(ax), "y": float(ay)},
+            "to": {"x": float(bx), "y": float(by)},
+            "points": [],
+            "whisker_count": 0,
+        }
+    points = np.stack([ax + (bx - ax) * t, ay + (by - ay) * t], axis=1)
 
     fallback = base_dir / max(base_length, 1e-12)
     radius = int(max(0, int(math.floor(settings["normalSearchRadiusPx"]))))
@@ -384,7 +428,7 @@ def _opop_refine_line(args):
         "from": {"x": float(refined_from[0]), "y": float(refined_from[1])},
         "to": {"x": float(refined_to[0]), "y": float(refined_to[1])},
         "points": [{"x": float(point[0]), "y": float(point[1])} for point in points.tolist()],
-        "whisker_count": int(whisker_count),
+        "whisker_count": int(points.shape[0]),
     }
 
 

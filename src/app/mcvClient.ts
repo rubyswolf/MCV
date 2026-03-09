@@ -126,6 +126,11 @@ type McvOpopSettings = {
   includeEndpoints?: boolean;
 };
 
+type McvOpopExcludeRange = {
+  startT: number;
+  endT: number;
+};
+
 type McvOpopLine = {
   from: ManualPoint;
   to: ManualPoint;
@@ -136,6 +141,7 @@ type McvOpopRefineLineArgs = {
   cache_key: string;
   line: McvOpopLine;
   drag_line?: McvOpopLine;
+  exclude_ranges?: Array<{ start_t: number; end_t: number }>;
   settings: McvOpopSettings;
 };
 
@@ -172,7 +178,8 @@ type McvClientRuntime = {
     imageDataUrl: string,
     line: McvOpopLine,
     settings: McvOpopSettings,
-    dragLine?: McvOpopLine
+    dragLine?: McvOpopLine,
+    excludeRanges?: McvOpopExcludeRange[]
   ) => Promise<McvOpopRefineLineResult>;
   prepareSobelCache: (imageDataUrl: string) => Promise<void>;
   clearSobelCache: (reason?: "viewer_exit" | "unload") => Promise<void>;
@@ -363,6 +370,52 @@ function clampNumber(value: number, min: number, max: number): number {
   return Math.min(max, Math.max(min, value));
 }
 
+function normalizeOpopExcludeRanges(ranges?: McvOpopExcludeRange[]): McvOpopExcludeRange[] {
+  if (!Array.isArray(ranges) || ranges.length === 0) {
+    return [];
+  }
+  const normalized = ranges
+    .map((range) => {
+      if (!range || !Number.isFinite(range.startT) || !Number.isFinite(range.endT)) {
+        return null;
+      }
+      const startT = clampNumber(Math.min(range.startT, range.endT), 0, 1);
+      const endT = clampNumber(Math.max(range.startT, range.endT), 0, 1);
+      if (!(endT - startT > 1e-6)) {
+        return null;
+      }
+      return {
+        startT,
+        endT,
+      } satisfies McvOpopExcludeRange;
+    })
+    .filter((range): range is McvOpopExcludeRange => range !== null)
+    .sort((first, second) => first.startT - second.startT);
+  const merged: McvOpopExcludeRange[] = [];
+  normalized.forEach((range) => {
+    const previous = merged[merged.length - 1];
+    if (!previous || range.startT > previous.endT + 1e-6) {
+      merged.push({ startT: range.startT, endT: range.endT });
+      return;
+    }
+    previous.endT = Math.max(previous.endT, range.endT);
+  });
+  return merged;
+}
+
+function isOpopTExcluded(t: number, ranges: McvOpopExcludeRange[]): boolean {
+  if (ranges.length === 0) {
+    return false;
+  }
+  for (let i = 0; i < ranges.length; i += 1) {
+    const range = ranges[i];
+    if (t >= range.startT - 1e-6 && t <= range.endT + 1e-6) {
+      return true;
+    }
+  }
+  return false;
+}
+
 function computeOpopWhiskerCount(
   lineLength: number,
   settings: McvOpopSettings
@@ -494,7 +547,8 @@ function runWebOpopRefineLine(
   sobelEntry: McvWebSobelCacheEntry,
   line: McvOpopLine,
   settings: McvOpopSettings,
-  dragLine?: McvOpopLine
+  dragLine?: McvOpopLine,
+  excludeRanges?: McvOpopExcludeRange[]
 ): McvOpopRefineLineResult {
   const ax = Number(line.from?.x);
   const ay = Number(line.from?.y);
@@ -528,30 +582,34 @@ function runWebOpopRefineLine(
   const straightnessGain = clampNumber(settings.straightnessStrength * 0.12, 0, 1.0);
 
   const points: ManualPoint[] = [];
+  const normalizedExcludeRanges = normalizeOpopExcludeRanges(excludeRanges);
   const includeEndpoints = Boolean(settings.includeEndpoints);
+  const baseTs: number[] = [];
   if (whiskerCount <= 1) {
-    points.push(
-      includeEndpoints
-        ? {
-            x: ax,
-            y: ay,
-          }
-        : {
-            x: (ax + bx) * 0.5,
-            y: (ay + by) * 0.5,
-          }
-    );
+    baseTs.push(includeEndpoints ? 0 : 0.5);
   } else {
     for (let i = 0; i < whiskerCount; i += 1) {
       const t = includeEndpoints
         ? i / (whiskerCount - 1)
         : (i + 1) / (whiskerCount + 1);
-      points.push({
-        x: ax + dx * t,
-        y: ay + dy * t,
-      });
+      baseTs.push(t);
     }
   }
+  const activeTs = baseTs.filter((t) => !isOpopTExcluded(t, normalizedExcludeRanges));
+  if (activeTs.length === 0) {
+    return {
+      from: { x: ax, y: ay },
+      to: { x: bx, y: by },
+      points: [],
+      whisker_count: 0,
+    };
+  }
+  activeTs.forEach((t) => {
+    points.push({
+      x: ax + dx * t,
+      y: ay + dy * t,
+    });
+  });
 
   let fallbackDir = normalizeVector(dx, dy);
   for (let iteration = 0; iteration < iterations; iteration += 1) {
@@ -656,7 +714,7 @@ function runWebOpopRefineLine(
       y: Number(toPoint.y),
     },
     points: points.map((point) => clampSamplePoint(point)),
-    whisker_count: whiskerCount,
+    whisker_count: points.length,
   };
 }
 
@@ -1344,7 +1402,8 @@ export function createMcvClient(config: McvClientConfig): McvClientRuntime {
     imageDataUrl: string,
     line: McvOpopLine,
     settings: McvOpopSettings,
-    dragLine?: McvOpopLine
+    dragLine?: McvOpopLine,
+    excludeRanges?: McvOpopExcludeRange[]
   ): Promise<McvOpopRefineLineResult> {
     if (typeof imageDataUrl !== "string" || !imageDataUrl.trim()) {
       throw new Error("image_data_url is required");
@@ -1356,8 +1415,10 @@ export function createMcvClient(config: McvClientConfig): McvClientRuntime {
         sobelEntry = await computeColorSobelWeb(getWebMcvRuntime, imageDataUrl);
         webSobelCache.set(cacheKey, sobelEntry);
       }
-      return runWebOpopRefineLine(sobelEntry, line, settings, dragLine);
+      return runWebOpopRefineLine(sobelEntry, line, settings, dragLine, excludeRanges);
     }
+
+    const normalizedExcludeRanges = normalizeOpopExcludeRanges(excludeRanges);
 
     const response = await callMcvApi<McvOpopRefineLineResult>({
       op: "cv.opopRefineLine",
@@ -1366,6 +1427,14 @@ export function createMcvClient(config: McvClientConfig): McvClientRuntime {
         cache_key: cacheKey,
         line,
         ...(dragLine ? { drag_line: dragLine } : {}),
+        ...(normalizedExcludeRanges.length > 0
+          ? {
+              exclude_ranges: normalizedExcludeRanges.map((range) => ({
+                start_t: range.startT,
+                end_t: range.endT,
+              })),
+            }
+          : {}),
         settings,
       } satisfies McvOpopRefineLineArgs,
     });
@@ -1465,7 +1534,18 @@ export function createMcvClient(config: McvClientConfig): McvClientRuntime {
               },
             };
           }
-          const data = await runOpopRefineLine(imageDataUrl, args.line, args.settings);
+          const data = await runOpopRefineLine(
+            imageDataUrl,
+            args.line,
+            args.settings,
+            args.drag_line,
+            Array.isArray(args.exclude_ranges)
+              ? args.exclude_ranges.map((range) => ({
+                  startT: Number(range?.start_t),
+                  endT: Number(range?.end_t),
+                }))
+              : undefined
+          );
           return {
             ok: true,
             data,

@@ -154,6 +154,15 @@ type DraftManualLine = {
   axis: ManualAxis;
   flipped: boolean;
   length?: number;
+  noGoRangesPx: DraftNoGoRangePx[];
+};
+type DraftNoGoRangePx = {
+  startPx: number;
+  endPx: number;
+};
+type OpopExcludeRange = {
+  startT: number;
+  endT: number;
 };
 type ManualInteractionMode = "draw" | "anchor" | "edit" | "vertexSolve" | "poseSolve" | "reproject";
 type OpopWhiskerMode = "per_pixel" | "per_line";
@@ -955,7 +964,8 @@ async function runOpopRefineLine(
   imageDataUrl: string,
   line: { from: ManualPoint; to: ManualPoint },
   settings: OpopSettings,
-  dragLine?: { from: ManualPoint; to: ManualPoint }
+  dragLine?: { from: ManualPoint; to: ManualPoint },
+  excludeRanges?: OpopExcludeRange[]
 ): Promise<McvOpopRefineLineResult> {
   return await mcvRuntime.runOpopRefineLine(
     imageDataUrl,
@@ -978,6 +988,12 @@ async function runOpopRefineLine(
           from: { x: dragLine.from.x, y: dragLine.from.y },
           to: { x: dragLine.to.x, y: dragLine.to.y },
         }
+      : undefined,
+    excludeRanges
+      ? excludeRanges.map((range) => ({
+          startT: clampNumber(range.startT, 0, 1),
+          endT: clampNumber(range.endT, 0, 1),
+        }))
       : undefined
   );
 }
@@ -1869,6 +1885,7 @@ function adjustDraftEdgeLength(delta: number): void {
           to: manualDraftLine.to,
           axis: manualDraftLine.axis,
           flipped: manualDraftLine.flipped,
+          noGoRangesPx: manualDraftLine.noGoRangesPx,
         };
   renderCropResultFromCache();
 }
@@ -2996,6 +3013,153 @@ function getDraftPotentialLinkIndexes(draft: DraftManualLine): Set<number> {
   return potential;
 }
 
+function getLineLength(from: ManualPoint, to: ManualPoint): number {
+  return Math.hypot(to.x - from.x, to.y - from.y);
+}
+
+function normalizeDraftNoGoRangePx(startPx: number, endPx: number): DraftNoGoRangePx | null {
+  if (!Number.isFinite(startPx) || !Number.isFinite(endPx)) {
+    return null;
+  }
+  const lo = Math.min(startPx, endPx);
+  const hi = Math.max(startPx, endPx);
+  if (!(hi - lo > 1e-4)) {
+    return null;
+  }
+  return {
+    startPx: Math.max(0, lo),
+    endPx: Math.max(0, hi),
+  };
+}
+
+function mergeDraftNoGoRangesPx(ranges: DraftNoGoRangePx[]): DraftNoGoRangePx[] {
+  if (ranges.length <= 1) {
+    return ranges
+      .map((range) => normalizeDraftNoGoRangePx(range.startPx, range.endPx))
+      .filter((range): range is DraftNoGoRangePx => range !== null);
+  }
+  const normalized = ranges
+    .map((range) => normalizeDraftNoGoRangePx(range.startPx, range.endPx))
+    .filter((range): range is DraftNoGoRangePx => range !== null)
+    .sort((first, second) => first.startPx - second.startPx);
+  const merged: DraftNoGoRangePx[] = [];
+  normalized.forEach((range) => {
+    const previous = merged[merged.length - 1];
+    if (!previous || range.startPx > previous.endPx + 1e-4) {
+      merged.push({ startPx: range.startPx, endPx: range.endPx });
+      return;
+    }
+    previous.endPx = Math.max(previous.endPx, range.endPx);
+  });
+  return merged;
+}
+
+function trimDraftNoGoRangesPx(ranges: DraftNoGoRangePx[], maxPx: number): DraftNoGoRangePx[] {
+  const limit = Math.max(0, Number.isFinite(maxPx) ? maxPx : 0);
+  const trimmed: DraftNoGoRangePx[] = [];
+  ranges.forEach((range) => {
+    const normalized = normalizeDraftNoGoRangePx(range.startPx, range.endPx);
+    if (!normalized) {
+      return;
+    }
+    if (normalized.startPx >= limit) {
+      return;
+    }
+    trimmed.push({
+      startPx: normalized.startPx,
+      endPx: Math.min(normalized.endPx, limit),
+    });
+  });
+  return mergeDraftNoGoRangesPx(trimmed);
+}
+
+function updateDraftNoGoRangesForTipLength(
+  ranges: DraftNoGoRangePx[],
+  previousLengthPx: number,
+  nextLengthPx: number,
+  shiftHeld: boolean
+): DraftNoGoRangePx[] {
+  let updated = trimDraftNoGoRangesPx(ranges, nextLengthPx);
+  if (shiftHeld && nextLengthPx > previousLengthPx + 1e-4) {
+    const added = normalizeDraftNoGoRangePx(previousLengthPx, nextLengthPx);
+    if (added) {
+      updated = mergeDraftNoGoRangesPx([...updated, added]);
+    }
+  }
+  return updated;
+}
+
+function normalizeExcludeRanges(ranges: OpopExcludeRange[]): OpopExcludeRange[] {
+  if (ranges.length === 0) {
+    return [];
+  }
+  const normalized = ranges
+    .map((range) => {
+      if (!Number.isFinite(range.startT) || !Number.isFinite(range.endT)) {
+        return null;
+      }
+      const start = clampNumber(Math.min(range.startT, range.endT), 0, 1);
+      const end = clampNumber(Math.max(range.startT, range.endT), 0, 1);
+      if (!(end - start > 1e-6)) {
+        return null;
+      }
+      return { startT: start, endT: end } satisfies OpopExcludeRange;
+    })
+    .filter((range): range is OpopExcludeRange => range !== null)
+    .sort((first, second) => first.startT - second.startT);
+  const merged: OpopExcludeRange[] = [];
+  normalized.forEach((range) => {
+    const previous = merged[merged.length - 1];
+    if (!previous || range.startT > previous.endT + 1e-6) {
+      merged.push({ startT: range.startT, endT: range.endT });
+      return;
+    }
+    previous.endT = Math.max(previous.endT, range.endT);
+  });
+  return merged;
+}
+
+function buildDraftExcludeRanges(draft: DraftManualLine): OpopExcludeRange[] {
+  const lineLength = getLineLength(draft.from, draft.to);
+  if (!(lineLength > 0)) {
+    return [];
+  }
+  const trimmedRanges = trimDraftNoGoRangesPx(draft.noGoRangesPx, lineLength);
+  const normalized = trimmedRanges
+    .map((range) => {
+      const start = clampNumber(range.startPx / lineLength, 0, 1);
+      const end = clampNumber(range.endPx / lineLength, 0, 1);
+      if (!(end - start > 1e-6)) {
+        return null;
+      }
+      if (!draft.flipped) {
+        return {
+          startT: start,
+          endT: end,
+        } satisfies OpopExcludeRange;
+      }
+      return {
+        startT: 1 - end,
+        endT: 1 - start,
+      } satisfies OpopExcludeRange;
+    })
+    .filter((range): range is OpopExcludeRange => range !== null);
+  return normalizeExcludeRanges(normalized);
+}
+
+function isTInsideExcludeRanges(t: number, excludeRanges: OpopExcludeRange[]): boolean {
+  if (excludeRanges.length === 0) {
+    return false;
+  }
+  for (let index = 0; index < excludeRanges.length; index += 1) {
+    const range = excludeRanges[index];
+    if (t >= range.startT - 1e-6 && t <= range.endT + 1e-6) {
+      return true;
+    }
+  }
+  return false;
+}
+
 function getOpopWhiskerCountForLine(segment: McvLineSegment, settings: OpopSettings = opopSettings): number {
   const dx = segment[2] - segment[0];
   const dy = segment[3] - segment[1];
@@ -3024,7 +3188,8 @@ function getOpopWhiskerTs(whiskerCount: number, includeEndpoints: boolean): numb
 
 function buildOpopWhiskerSegmentsForSegment(
   segment: McvLineSegment,
-  settings: OpopSettings = opopSettings
+  settings: OpopSettings = opopSettings,
+  excludeRanges: OpopExcludeRange[] = []
 ): McvLineSegment[] {
   const dx = segment[2] - segment[0];
   const dy = segment[3] - segment[1];
@@ -3044,7 +3209,10 @@ function buildOpopWhiskerSegmentsForSegment(
   const tangentY = dy / lineLength;
   const normalX = -tangentY;
   const normalY = tangentX;
-  const ts = getOpopWhiskerTs(whiskerCount, settings.includeEndpoints);
+  const normalizedExcludeRanges = normalizeExcludeRanges(excludeRanges);
+  const ts = getOpopWhiskerTs(whiskerCount, settings.includeEndpoints).filter(
+    (t) => !isTInsideExcludeRanges(t, normalizedExcludeRanges)
+  );
   return ts.map((t) => {
     const cx = segment[0] + dx * t;
     const cy = segment[1] + dy * t;
@@ -3081,12 +3249,13 @@ function appendOpopWhiskersForSegment(
   stroke: string,
   strokeWidth: number,
   settings: OpopSettings = opopSettings,
-  opacityScale = 1
+  opacityScale = 1,
+  excludeRanges: OpopExcludeRange[] = []
 ): void {
   if (!settings.enabled) {
     return;
   }
-  const whiskers = buildOpopWhiskerSegmentsForSegment(segment, settings);
+  const whiskers = buildOpopWhiskerSegmentsForSegment(segment, settings, excludeRanges);
   if (whiskers.length === 0) {
     return;
   }
@@ -3189,10 +3358,11 @@ function startOpopLineAnimation(
   targetFrom: ManualPoint,
   targetTo: ManualPoint,
   optimizedPoints: ManualPoint[],
-  settingsSnapshot: OpopSettings
+  settingsSnapshot: OpopSettings,
+  excludeRanges: OpopExcludeRange[] = []
 ): void {
   const sourceSegment = SvgUtils.getLineSegmentForLine(sourceLine);
-  const whiskers = buildOpopWhiskerSegmentsForSegment(sourceSegment, settingsSnapshot);
+  const whiskers = buildOpopWhiskerSegmentsForSegment(sourceSegment, settingsSnapshot, excludeRanges);
   const projectedPoints = optimizedPoints.map((point, index) => {
     const whisker = whiskers[index];
     return whisker ? projectPointToSegmentLine(point, whisker) : { x: point.x, y: point.y };
@@ -3297,7 +3467,8 @@ async function runOpopRefineForLine(
   sourceLine: ManualAnnotation,
   sourceImageDataUrl: string,
   settingsSnapshot: OpopSettings,
-  dragLine?: { from: ManualPoint; to: ManualPoint }
+  dragLine?: { from: ManualPoint; to: ManualPoint },
+  excludeRanges: OpopExcludeRange[] = []
 ): Promise<void> {
   if (!settingsSnapshot.enabled) {
     opopLineAnimations.delete(lineIndex);
@@ -3307,7 +3478,13 @@ async function runOpopRefineForLine(
   const nextToken = (opopRefineTokenByLine.get(lineIndex) ?? 0) + 1;
   opopRefineTokenByLine.set(lineIndex, nextToken);
   try {
-    const result = await runOpopRefineLine(sourceImageDataUrl, sourceLine, settingsSnapshot, dragLine);
+    const result = await runOpopRefineLine(
+      sourceImageDataUrl,
+      sourceLine,
+      settingsSnapshot,
+      dragLine,
+      excludeRanges
+    );
     if (opopRefineTokenByLine.get(lineIndex) !== nextToken) {
       return;
     }
@@ -3326,7 +3503,8 @@ async function runOpopRefineForLine(
       { x: result.from.x, y: result.from.y },
       { x: result.to.x, y: result.to.y },
       safePoints,
-      settingsSnapshot
+      settingsSnapshot,
+      excludeRanges
     );
     renderCropResultFromCache();
   } catch {
@@ -3431,6 +3609,7 @@ function createManualModeCropResultSvg(
   if (!anchorMode && !vertexSolveMode && !reprojectMode && manualDraftLine) {
     const draftSegment = SvgUtils.getLineSegmentForDraft(manualDraftLine);
     const axisColor = SvgUtils.getAxisColor(manualDraftLine.axis);
+    const draftExcludeRanges = buildDraftExcludeRanges(manualDraftLine);
     SvgUtils.appendSvgLine(
       sceneGroup,
       draftSegment,
@@ -3439,7 +3618,7 @@ function createManualModeCropResultSvg(
       0.95,
       SvgUtils.getAxisMarkerId(manualDraftLine.axis)
     );
-    appendOpopWhiskersForSegment(sceneGroup, draftSegment, axisColor, 2);
+    appendOpopWhiskersForSegment(sceneGroup, draftSegment, axisColor, 2, opopSettings, 1, draftExcludeRanges);
     SvgUtils.appendSvgLineLabel(sceneGroup, draftSegment, manualDraftLine.length, axisColor);
   }
 
@@ -3579,6 +3758,7 @@ function createManualModeCropResultSvg(
       to: { x: point.x, y: point.y },
       axis: manualAxisSelection,
       flipped: manualAxisStartsBackwards,
+      noGoRangesPx: [],
     };
     manualDragPointerId = event.pointerId;
     manualDragClientX = event.clientX;
@@ -3748,12 +3928,21 @@ function updateManualDraftFromPointer(pointer: PointerEvent): void {
   if (!point) {
     return;
   }
+  const previousLengthPx = getLineLength(manualDraftLine.from, manualDraftLine.to);
+  const nextLengthPx = getLineLength(manualDraftLine.from, point);
+  const nextNoGoRangesPx = updateDraftNoGoRangesForTipLength(
+    manualDraftLine.noGoRangesPx,
+    previousLengthPx,
+    nextLengthPx,
+    pointer.shiftKey
+  );
   manualDraftLine = {
     ...manualDraftLine,
     to: {
       x: point.x,
       y: point.y,
     },
+    noGoRangesPx: nextNoGoRangesPx,
   };
   renderCropResultFromCache();
 }
@@ -3793,6 +3982,12 @@ function finalizeManualDraftFromPointer(pointer: PointerEvent): void {
     ? {
         ...manualDraftLine,
         to: { x: point.x, y: point.y },
+        noGoRangesPx: updateDraftNoGoRangesForTipLength(
+          manualDraftLine.noGoRangesPx,
+          getLineLength(manualDraftLine.from, manualDraftLine.to),
+          getLineLength(manualDraftLine.from, point),
+          pointer.shiftKey
+        ),
       }
     : manualDraftLine;
   const committedFrom = updatedDraft.flipped ? updatedDraft.to : updatedDraft.from;
@@ -3818,11 +4013,19 @@ function finalizeManualDraftFromPointer(pointer: PointerEvent): void {
       const sourceImageDataUrl = cropResultCache.colorDataUrl;
       const sourceLine = captureLineSnapshot(newLine);
       const settingsSnapshot = getOpopSettings();
+      const excludeRanges = buildDraftExcludeRanges(updatedDraft);
       const dragLine = {
         from: { x: committedFrom.x, y: committedFrom.y },
         to: { x: committedTo.x, y: committedTo.y },
       };
-      void runOpopRefineForLine(newLineIndex, sourceLine, sourceImageDataUrl, settingsSnapshot, dragLine);
+      void runOpopRefineForLine(
+        newLineIndex,
+        sourceLine,
+        sourceImageDataUrl,
+        settingsSnapshot,
+        dragLine,
+        excludeRanges
+      );
     }
     manualRedoLines.length = 0;
   }
