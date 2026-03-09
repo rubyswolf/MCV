@@ -285,6 +285,7 @@ declare global {
     MCV_API?: McvClientApi;
     MCV_DATA?: {
       annotations: ManualAnnotation[];
+      opop: Array<ManualAnnotation | null>;
       structure: StructureData;
       source?: McvDataSource;
     };
@@ -313,6 +314,7 @@ let viewerImageRenderToken = 0;
 let pendingImportedMcvState:
   | {
       annotations: ManualAnnotation[];
+      opop: Array<ManualAnnotation | null>;
       anchors: StructureAnchor[];
       vertices: StructureVertexData[];
       source?: McvDataSource;
@@ -349,8 +351,14 @@ const opopSettings: OpopSettings = {
 const opopLineAnimations = new Map<number, OpopLineAnimation>();
 const opopRefineTokenByLine = new Map<number, number>();
 let opopAnimationRafId: number | null = null;
-const MCV_DATA: { annotations: ManualAnnotation[]; structure: StructureData; source?: McvDataSource } = {
+const MCV_DATA: {
+  annotations: ManualAnnotation[];
+  opop: Array<ManualAnnotation | null>;
+  structure: StructureData;
+  source?: McvDataSource;
+} = {
   annotations: [],
+  opop: [],
   structure: {
     lines: [],
     anchors: [],
@@ -380,6 +388,7 @@ let poseSolveState:
   | null = null;
 let poseSolveRunToken = 0;
 let viewerCtrlHeld = false;
+let renderOpopPreviewHeld = false;
 let renderAnnotationPreviewHeld = false;
 let viewerMotionRafId: number | null = null;
 const viewerMotion = {
@@ -480,6 +489,52 @@ function createStructureLineFromAnnotation(annotation: ManualAnnotation): Struct
     axis: annotation.axis,
     ...(annotation.length !== undefined && annotation.length > 0 ? { length: annotation.length } : {}),
   };
+}
+
+function cloneAnnotationLine(line: ManualAnnotation): ManualAnnotation {
+  return {
+    from: { x: line.from.x, y: line.from.y },
+    to: { x: line.to.x, y: line.to.y },
+    axis: line.axis,
+    ...(line.length !== undefined ? { length: line.length } : {}),
+  };
+}
+
+function alignOpopLayerToAnnotations(): void {
+  const targetLength = MCV_DATA.annotations.length;
+  while (MCV_DATA.opop.length < targetLength) {
+    MCV_DATA.opop.push(null);
+  }
+  if (MCV_DATA.opop.length > targetLength) {
+    MCV_DATA.opop.length = targetLength;
+  }
+}
+
+function getLineForStructureIndex(index: number): ManualAnnotation | null {
+  const annotationLine = MCV_DATA.annotations[index];
+  if (!annotationLine) {
+    return null;
+  }
+  return MCV_DATA.opop[index] ?? annotationLine;
+}
+
+function getLinesForStructure(): ManualAnnotation[] {
+  alignOpopLayerToAnnotations();
+  const lines: ManualAnnotation[] = [];
+  for (let index = 0; index < MCV_DATA.annotations.length; index += 1) {
+    const line = getLineForStructureIndex(index);
+    if (line) {
+      lines.push(line);
+    }
+  }
+  return lines;
+}
+
+function clearOpopLine(index: number): void {
+  if (index < 0 || index >= MCV_DATA.opop.length) {
+    return;
+  }
+  MCV_DATA.opop[index] = null;
 }
 
 function syncStructureEndpointRefs(): void {
@@ -628,18 +683,18 @@ function setStructureEndpointPoint(
 }
 
 function recomputeStructureGeometryFromConnections(): void {
-  const annotations = MCV_DATA.annotations;
+  const sourceLines = getLinesForStructure();
   const structureLines = MCV_DATA.structure.lines;
-  if (annotations.length !== structureLines.length) {
+  if (sourceLines.length !== structureLines.length) {
     return;
   }
 
-  // Always restart from raw annotations so refinement never cascades.
+  // Always restart from selected source lines so snap solves never cascade.
   for (let i = 0; i < structureLines.length; i += 1) {
-    structureLines[i].from.x = annotations[i].from.x;
-    structureLines[i].from.y = annotations[i].from.y;
-    structureLines[i].to.x = annotations[i].to.x;
-    structureLines[i].to.y = annotations[i].to.y;
+    structureLines[i].from.x = sourceLines[i].from.x;
+    structureLines[i].from.y = sourceLines[i].from.y;
+    structureLines[i].to.x = sourceLines[i].to.x;
+    structureLines[i].to.y = sourceLines[i].to.y;
   }
 
   const endpointCount = structureLines.length * 2;
@@ -685,7 +740,7 @@ function recomputeStructureGeometryFromConnections(): void {
     if (uniqueLineIndexes.length < 2) {
       continue;
     }
-    const linesForSolve = uniqueLineIndexes.map((index) => annotations[index]);
+    const linesForSolve = uniqueLineIndexes.map((index) => sourceLines[index]);
     let snapPoint: ManualPoint | null = null;
     if (linesForSolve.length === 2) {
       snapPoint =
@@ -708,14 +763,14 @@ function linkLineIndexAgainstOthers(lineIndex: number): void {
   if (lineIndex < 0 || lineIndex >= lines.length) {
     return;
   }
-  const annotations = MCV_DATA.annotations;
+  const sourceLines = getLinesForStructure();
   const line = lines[lineIndex];
   line.from.from.length = 0;
   line.from.to.length = 0;
   line.to.from.length = 0;
   line.to.to.length = 0;
 
-  const threshold = Geometry.computeStructureLinkThreshold(MCV_DATA.annotations);
+  const threshold = Geometry.computeStructureLinkThreshold(sourceLines);
   for (let otherIndex = 0; otherIndex < lines.length; otherIndex += 1) {
     if (otherIndex === lineIndex) {
       continue;
@@ -724,8 +779,8 @@ function linkLineIndexAgainstOthers(lineIndex: number): void {
     if (other.axis === line.axis) {
       continue;
     }
-    const lineAnnotation = annotations[lineIndex];
-    const otherAnnotation = annotations[otherIndex];
+    const lineAnnotation = sourceLines[lineIndex];
+    const otherAnnotation = sourceLines[otherIndex];
     if (!lineAnnotation || !otherAnnotation) {
       continue;
     }
@@ -743,7 +798,8 @@ function linkLineIndexAgainstOthers(lineIndex: number): void {
 }
 
 function pushAnnotationWithStructureLink(annotation: ManualAnnotation): void {
-  MCV_DATA.annotations.push(annotation);
+  MCV_DATA.annotations.push(cloneAnnotationLine(annotation));
+  MCV_DATA.opop.push(null);
   MCV_DATA.structure.lines.push(createStructureLineFromAnnotation(annotation));
   linkLineIndexAgainstOthers(MCV_DATA.structure.lines.length - 1);
   recomputeStructureGeometryFromConnections();
@@ -757,6 +813,7 @@ function popAnnotationWithStructureUnlink(): ManualAnnotation | undefined {
   }
   const removedIndex = MCV_DATA.structure.lines.length - 1;
   const removed = MCV_DATA.annotations.pop();
+  MCV_DATA.opop.pop();
   MCV_DATA.structure.lines.pop();
   opopLineAnimations.delete(removedIndex);
   opopRefineTokenByLine.delete(removedIndex);
@@ -792,8 +849,9 @@ function popAnnotationWithStructureUnlink(): ManualAnnotation | undefined {
 }
 
 function rebuildStructureFromAnnotations(): void {
-  const annotations = MCV_DATA.annotations;
-  MCV_DATA.structure.lines = annotations.map((line) => createStructureLineFromAnnotation(line));
+  alignOpopLayerToAnnotations();
+  const lines = getLinesForStructure();
+  MCV_DATA.structure.lines = lines.map((line) => createStructureLineFromAnnotation(line));
   for (let i = 0; i < MCV_DATA.structure.lines.length; i += 1) {
     linkLineIndexAgainstOthers(i);
   }
@@ -845,6 +903,7 @@ function remapOpopIndexesAfterLineRemoval(removedLineIndex: number): void {
 
 function resetCropInteractionState(): void {
   MCV_DATA.annotations.length = 0;
+  MCV_DATA.opop.length = 0;
   MCV_DATA.structure.lines.length = 0;
   MCV_DATA.structure.anchors.length = 0;
   MCV_DATA.structure.vertices.length = 0;
@@ -864,6 +923,7 @@ function resetCropInteractionState(): void {
   poseSolveState = null;
   poseSolveRunToken += 1;
   manualAxisStartsBackwards = false;
+  renderOpopPreviewHeld = false;
   renderAnnotationPreviewHeld = false;
   clearOpopOptimizedPoints();
   clearAnnotationsDirty();
@@ -2594,7 +2654,13 @@ function runVertexSolveAndBuildData(): VertexSolveRenderData {
 }
 
 function getCurrentLinesForDisplay(): Array<ManualAnnotation | StructureLine> {
-  return renderAnnotationPreviewHeld ? MCV_DATA.annotations : MCV_DATA.structure.lines;
+  if (renderOpopPreviewHeld) {
+    if (renderAnnotationPreviewHeld) {
+      return MCV_DATA.annotations;
+    }
+    return getLinesForStructure();
+  }
+  return MCV_DATA.structure.lines;
 }
 
 function findClosestDisplayedLineIndex(point: ManualPoint): number {
@@ -2718,6 +2784,14 @@ function adjustSelectedLineLength(delta: number): void {
   } else {
     delete line.length;
   }
+  const opopLine = MCV_DATA.opop[manualEditSelectedLineIndex];
+  if (opopLine) {
+    if (next > 0) {
+      opopLine.length = next;
+    } else {
+      delete opopLine.length;
+    }
+  }
   const structureLine = MCV_DATA.structure.lines[manualEditSelectedLineIndex];
   if (structureLine) {
     if (next > 0) {
@@ -2743,6 +2817,7 @@ function flipSelectedLineDirection(): void {
   const nextTo = { x: line.from.x, y: line.from.y };
   line.from = nextFrom;
   line.to = nextTo;
+  clearOpopLine(manualEditSelectedLineIndex);
   swapAnchorEndpointForLine(manualEditSelectedLineIndex);
   rebuildStructureFromAnnotations();
   markAnnotationsDirty();
@@ -2766,6 +2841,7 @@ function updateSelectedLineAxis(axis: ManualAxis, startsBackwards: boolean): voi
     line.to = nextTo;
     swapAnchorEndpointForLine(manualEditSelectedLineIndex);
   }
+  clearOpopLine(manualEditSelectedLineIndex);
   rebuildStructureFromAnnotations();
   markAnnotationsDirty();
   renderCropResultFromCache();
@@ -2817,6 +2893,7 @@ function removeLineAtIndex(lineIndex: number): void {
     return;
   }
   MCV_DATA.annotations.splice(lineIndex, 1);
+  MCV_DATA.opop.splice(lineIndex, 1);
   remapOpopIndexesAfterLineRemoval(lineIndex);
   rebuildAnchorsAndVerticesAfterLineRemoval(lineIndex);
   if (manualEditSelectedLineIndex !== null) {
@@ -2909,9 +2986,10 @@ function annotationsWouldLink(first: ManualAnnotation, second: ManualAnnotation,
 function getDraftPotentialLinkIndexes(draft: DraftManualLine): Set<number> {
   const potential = new Set<number>();
   const draftAnnotation = getDraftAsAnnotation(draft);
-  const threshold = Geometry.computeStructureLinkThreshold([...MCV_DATA.annotations, draftAnnotation]);
-  for (let index = 0; index < MCV_DATA.annotations.length; index += 1) {
-    if (annotationsWouldLink(draftAnnotation, MCV_DATA.annotations[index], threshold)) {
+  const sourceLines = getLinesForStructure();
+  const threshold = Geometry.computeStructureLinkThreshold([...sourceLines, draftAnnotation]);
+  for (let index = 0; index < sourceLines.length; index += 1) {
+    if (annotationsWouldLink(draftAnnotation, sourceLines[index], threshold)) {
       potential.add(index);
     }
   }
@@ -3056,22 +3134,19 @@ function tickOpopAnimations(now: number): void {
 
   let committedLine = false;
   opopLineAnimations.forEach((animation, lineIndex) => {
-    const line = MCV_DATA.annotations[lineIndex];
-    if (!line) {
+    const sourceLine = MCV_DATA.annotations[lineIndex];
+    if (!sourceLine) {
       opopLineAnimations.delete(lineIndex);
       return;
     }
     const slideElapsed = now - animation.startedAt;
     if (slideElapsed >= animation.slideDurationMs && animation.fadeStartedAt === null) {
-      line.from = { x: animation.targetFrom.x, y: animation.targetFrom.y };
-      line.to = { x: animation.targetTo.x, y: animation.targetTo.y };
-      const structureLine = MCV_DATA.structure.lines[lineIndex];
-      if (structureLine) {
-        structureLine.from.x = animation.targetFrom.x;
-        structureLine.from.y = animation.targetFrom.y;
-        structureLine.to.x = animation.targetTo.x;
-        structureLine.to.y = animation.targetTo.y;
-      }
+      MCV_DATA.opop[lineIndex] = {
+        from: { x: animation.targetFrom.x, y: animation.targetFrom.y },
+        to: { x: animation.targetTo.x, y: animation.targetTo.y },
+        axis: sourceLine.axis,
+        ...(sourceLine.length !== undefined ? { length: sourceLine.length } : {}),
+      };
       animation.fadeStartedAt = now;
       animation.overlayOpacity = 1;
       committedLine = true;
@@ -3087,6 +3162,7 @@ function tickOpopAnimations(now: number): void {
   if (committedLine) {
     markAnnotationsDirty();
     // Rebuild once at slide-complete so base SVG line is present during fade phase.
+    rebuildStructureFromAnnotations();
     renderCropResultFromCache();
   }
 
@@ -3944,6 +4020,7 @@ function getVertexDotPoint(vertex: StructureVertexData): ManualPoint | null {
 
 function applyImportedMcvState(data: {
   annotations: ManualAnnotation[];
+  opop: Array<ManualAnnotation | null>;
   anchors: StructureAnchor[];
   vertices: StructureVertexData[];
   source?: McvDataSource;
@@ -3954,6 +4031,18 @@ function applyImportedMcvState(data: {
     axis: line.axis,
     ...(line.length !== undefined ? { length: line.length } : {}),
   }));
+  MCV_DATA.opop = Array.from({ length: MCV_DATA.annotations.length }, (_, index) => {
+    const line = data.opop[index];
+    if (!line) {
+      return null;
+    }
+    return {
+      from: { x: line.from.x, y: line.from.y },
+      to: { x: line.to.x, y: line.to.y },
+      axis: line.axis,
+      ...(line.length !== undefined ? { length: line.length } : {}),
+    };
+  });
   MCV_DATA.structure.anchors = data.anchors.map((anchor) => ({
     from: Geometry.normalizeLineRefs(anchor.from),
     to: Geometry.normalizeLineRefs(anchor.to),
@@ -3992,6 +4081,7 @@ function applyImportedMcvState(data: {
   vertexSolveRenderData = null;
   poseSolveState = null;
   poseSolveRunToken += 1;
+  renderOpopPreviewHeld = false;
   renderAnnotationPreviewHeld = false;
   clearOpopOptimizedPoints();
   clearAnnotationsDirty();
@@ -4072,8 +4162,16 @@ async function saveCurrentStateAsSvg(): Promise<void> {
   baseImage.setAttribute("preserveAspectRatio", "none");
   baseLayer.appendChild(baseImage);
 
-  const annotationLayer = SvgUtils.createSvgLayer(svg, "annotation", false);
+  const annotationLayer = SvgUtils.createSvgLayer(svg, "annotations", false);
   SvgUtils.renderLinesToLayer(annotationLayer, MCV_DATA.annotations, true, true);
+
+  const opopLayer = SvgUtils.createSvgLayer(svg, "opop", false);
+  SvgUtils.renderLinesToLayer(
+    opopLayer,
+    MCV_DATA.opop.filter((line): line is ManualAnnotation => line !== null),
+    true,
+    true
+  );
 
   const structureLayer = SvgUtils.createSvgLayer(svg, "structure", true);
   SvgUtils.renderLinesToLayer(structureLayer, MCV_DATA.structure.lines, true, true);
@@ -5252,9 +5350,18 @@ function installUiHandlers(): void {
         target.tagName === "TEXTAREA" ||
         target.isContentEditable);
     if (event.code === "Backquote" && !targetIsEditable) {
+      if (!renderOpopPreviewHeld) {
+        renderOpopPreviewHeld = true;
+        if (cropResultCache) {
+          renderCropResultFromCache();
+        }
+      }
+      return;
+    }
+    if (event.key === "Shift") {
       if (!renderAnnotationPreviewHeld) {
         renderAnnotationPreviewHeld = true;
-        if (cropResultCache) {
+        if (renderOpopPreviewHeld && cropResultCache) {
           renderCropResultFromCache();
         }
       }
@@ -5274,9 +5381,18 @@ function installUiHandlers(): void {
   });
   document.addEventListener("keyup", (event) => {
     if (event.code === "Backquote") {
+      if (renderOpopPreviewHeld) {
+        renderOpopPreviewHeld = false;
+        if (cropResultCache) {
+          renderCropResultFromCache();
+        }
+      }
+      return;
+    }
+    if (event.key === "Shift") {
       if (renderAnnotationPreviewHeld) {
         renderAnnotationPreviewHeld = false;
-        if (cropResultCache) {
+        if (renderOpopPreviewHeld && cropResultCache) {
           renderCropResultFromCache();
         }
       }
@@ -5297,7 +5413,8 @@ function installUiHandlers(): void {
   window.addEventListener("blur", () => {
     viewerCtrlHeld = false;
     releaseViewerGrab();
-    if (renderAnnotationPreviewHeld) {
+    if (renderOpopPreviewHeld || renderAnnotationPreviewHeld) {
+      renderOpopPreviewHeld = false;
       renderAnnotationPreviewHeld = false;
       if (cropResultCache) {
         renderCropResultFromCache();

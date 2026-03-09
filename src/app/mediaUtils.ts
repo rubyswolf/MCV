@@ -388,22 +388,12 @@ export function normalizeImportedLineRefs(value: unknown, maxLines: number): num
   );
 }
 
-export function normalizeImportedMcvData(value: unknown): {
-  annotations: ManualAnnotation[];
-  anchors: StructureAnchor[];
-  vertices: StructureVertexData[];
-  source?: McvDataSource;
-} | null {
-  if (typeof value !== "object" || value === null) {
-    return null;
+function parseImportedAnnotationLayer(value: unknown): ManualAnnotation[] {
+  if (!Array.isArray(value)) {
+    return [];
   }
-  const data = value as Record<string, unknown>;
-  if (!Array.isArray(data.annotations)) {
-    return null;
-  }
-
   const annotations: ManualAnnotation[] = [];
-  for (const entry of data.annotations) {
+  for (const entry of value) {
     if (typeof entry !== "object" || entry === null) {
       continue;
     }
@@ -428,6 +418,29 @@ export function normalizeImportedMcvData(value: unknown): {
     }
     annotations.push(line);
   }
+  return annotations;
+}
+
+export function normalizeImportedMcvData(value: unknown): {
+  annotations: ManualAnnotation[];
+  opop: Array<ManualAnnotation | null>;
+  anchors: StructureAnchor[];
+  vertices: StructureVertexData[];
+  source?: McvDataSource;
+} | null {
+  if (typeof value !== "object" || value === null) {
+    return null;
+  }
+  const data = value as Record<string, unknown>;
+  if (!Array.isArray(data.annotations)) {
+    return null;
+  }
+  const annotations = parseImportedAnnotationLayer(data.annotations);
+  const parsedOpop = parseImportedAnnotationLayer(data.opop);
+  const opop = Array.from({ length: annotations.length }, (_, index) => {
+    const line = parsedOpop[index];
+    return line ? { ...line, from: { ...line.from }, to: { ...line.to } } : null;
+  });
 
   const structure = data.structure as Record<string, unknown> | undefined;
   const maxLines = annotations.length;
@@ -528,6 +541,7 @@ export function normalizeImportedMcvData(value: unknown): {
 
   return {
     annotations,
+    opop,
     anchors: parsedAnchors,
     vertices,
     ...(source ? { source } : {}),
