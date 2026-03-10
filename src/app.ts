@@ -417,6 +417,7 @@ let manualEditSelectedLineIndex: number | null = null;
 let vertexSolveRenderData: VertexSolveRenderData | null = null;
 let vertexSolveHoveredVertexIndex: number | null = null;
 let reprojectHoverVertex: ReprojectKnownVertex | null = null;
+let reprojectAnchorCandidateVertex: StructureVertex | null = null;
 let reprojectSelectedVertex: ReprojectKnownVertex | null = null;
 let reprojectExtensionSteps: ReprojectExtensionStep[] = [];
 let reprojectExtensionProjectedPoints: ManualPoint[] = [];
@@ -964,6 +965,7 @@ function resetCropInteractionState(): void {
   vertexSolveRenderData = null;
   vertexSolveHoveredVertexIndex = null;
   reprojectHoverVertex = null;
+  reprojectAnchorCandidateVertex = null;
   clearReprojectSelectionAndExtension();
   poseSolveState = null;
   poseSolveRunToken += 1;
@@ -1970,6 +1972,7 @@ function setManualInteractionMode(mode: ManualInteractionMode): void {
   manualInteractionMode = mode;
   if (mode !== "reproject") {
     reprojectHoverVertex = null;
+    reprojectAnchorCandidateVertex = null;
   }
   if (mode === "anchor") {
     clearReprojectSelectionAndExtension();
@@ -2347,6 +2350,13 @@ function getAnchorLinkedLineIndexes(anchor: StructureAnchor): Set<number> {
   return indexes;
 }
 
+function buildLineRefsFromEndpointIds(endpointIds: number[]): { from: number[]; to: number[] } {
+  return {
+    from: Geometry.normalizeLineRefs(endpointIds.filter((id) => id % 2 === 0).map((id) => Math.floor(id / 2))),
+    to: Geometry.normalizeLineRefs(endpointIds.filter((id) => id % 2 === 1).map((id) => Math.floor(id / 2))),
+  };
+}
+
 function findAnchorByLinks(from: number[], to: number[]): number {
   const sortedFrom = Array.from(new Set(from)).sort((a, b) => a - b);
   const sortedTo = Array.from(new Set(to)).sort((a, b) => a - b);
@@ -2403,6 +2413,10 @@ function updateAnchorHoverFromClient(clientX: number, clientY: number): void {
       reprojectHoverVertex = null;
       renderCropResultFromCache();
     }
+    if (reprojectAnchorCandidateVertex !== null) {
+      reprojectAnchorCandidateVertex = null;
+      renderCropResultFromCache();
+    }
     return;
   }
   if (mode === "reproject") {
@@ -2410,32 +2424,48 @@ function updateAnchorHoverFromClient(clientX: number, clientY: number): void {
     const knownVertices = buildReprojectKnownVertices(
       poseSolveState?.status === "done" ? poseSolveState.result : undefined
     );
-    if (!point || knownVertices.length === 0) {
-      if (reprojectHoverVertex !== null) {
-        reprojectHoverVertex = null;
+    if (!point) {
+      const hoverChanged = reprojectHoverVertex !== null;
+      const candidateChanged = reprojectAnchorCandidateVertex !== null;
+      reprojectHoverVertex = null;
+      reprojectAnchorCandidateVertex = null;
+      if (hoverChanged || candidateChanged) {
         renderCropResultFromCache();
       }
       return;
     }
-    let next: ReprojectKnownVertex | null = null;
-    let bestDistance = Number.POSITIVE_INFINITY;
-    knownVertices.forEach((vertex) => {
-      const distance = Math.hypot(vertex.point.x - point.x, vertex.point.y - point.y);
-      if (distance < bestDistance) {
-        bestDistance = distance;
-        next = vertex;
-      }
-    });
-    if (!next) {
-      if (reprojectHoverVertex !== null) {
-        reprojectHoverVertex = null;
-        renderCropResultFromCache();
-      }
-      return;
+    let nextKnown: ReprojectKnownVertex | null = null;
+    if (knownVertices.length > 0) {
+      let bestDistance = Number.POSITIVE_INFINITY;
+      knownVertices.forEach((vertex) => {
+        const distance = Math.hypot(vertex.point.x - point.x, vertex.point.y - point.y);
+        if (distance < bestDistance) {
+          bestDistance = distance;
+          nextKnown = vertex;
+        }
+      });
     }
-    const changed = !reprojectHoverVertex || reprojectHoverVertex.vertexIndex !== next.vertexIndex;
-    if (changed) {
-      reprojectHoverVertex = next;
+    const hitRadius = getAnchorPointerHitRadiusInImagePixels();
+    const nearestStructureVertex = findNearestStructureVertex(point);
+    const nextCandidate =
+      reprojectSelectedVertex &&
+      reprojectExtensionSteps.length > 0 &&
+      nearestStructureVertex &&
+      Math.hypot(nearestStructureVertex.point.x - point.x, nearestStructureVertex.point.y - point.y) <= hitRadius
+        ? nearestStructureVertex
+        : null;
+
+    const hoverChanged =
+      (reprojectHoverVertex === null) !== (nextKnown === null) ||
+      (reprojectHoverVertex !== null && nextKnown !== null && reprojectHoverVertex.vertexIndex !== nextKnown.vertexIndex);
+    const candidateChanged =
+      (reprojectAnchorCandidateVertex === null) !== (nextCandidate === null) ||
+      (reprojectAnchorCandidateVertex !== null &&
+        nextCandidate !== null &&
+        !Geometry.areSortedArraysEqual(reprojectAnchorCandidateVertex.endpointIds, nextCandidate.endpointIds));
+    if (hoverChanged || candidateChanged) {
+      reprojectHoverVertex = nextKnown;
+      reprojectAnchorCandidateVertex = nextCandidate;
       renderCropResultFromCache();
     }
     return;
@@ -2485,6 +2515,7 @@ function findNearestStructureVertex(point: ManualPoint): StructureVertex | null 
 function clearReprojectSelectionAndExtension(): void {
   reprojectExtensionProjectionToken += 1;
   reprojectSelectedVertex = null;
+  reprojectAnchorCandidateVertex = null;
   reprojectExtensionSteps = [];
   reprojectExtensionProjectedPoints = [];
 }
@@ -2655,6 +2686,50 @@ function buildReprojectExtensionWorldPoints(selectedVertex: ReprojectKnownVertex
     cursor = next;
   });
   return points;
+}
+
+function getReprojectExtensionTipWorldPoint(): McvProjectWorldPoint | null {
+  if (!reprojectSelectedVertex || reprojectExtensionSteps.length === 0) {
+    return null;
+  }
+  const worldPoints = buildReprojectExtensionWorldPoints(reprojectSelectedVertex);
+  return worldPoints[worldPoints.length - 1] ?? null;
+}
+
+function tryCreateAnchorFromReprojectExtensionAtVertex(vertex: StructureVertex): number | null {
+  const tip = getReprojectExtensionTipWorldPoint();
+  if (!tip) {
+    return null;
+  }
+  const refs = buildLineRefsFromEndpointIds(vertex.endpointIds);
+  if (refs.from.length === 0 && refs.to.length === 0) {
+    return null;
+  }
+  let anchorIndex = findAnchorByLinks(refs.from, refs.to);
+  if (anchorIndex < 0) {
+    anchorIndex = createAnchorWithVertex(refs.from, refs.to);
+  }
+  const anchor = MCV_DATA.structure.anchors[anchorIndex];
+  if (!anchor) {
+    return null;
+  }
+  anchor.from = refs.from.slice();
+  anchor.to = refs.to.slice();
+  anchor.x = tip.x;
+  anchor.y = tip.y;
+  anchor.z = tip.z;
+  const anchorVertex = MCV_DATA.structure.vertices[anchor.vertex];
+  if (anchorVertex) {
+    anchorVertex.from = refs.from.slice();
+    anchorVertex.to = refs.to.slice();
+    anchorVertex.x = tip.x;
+    anchorVertex.y = tip.y;
+    anchorVertex.z = tip.z;
+    anchorVertex.anchor = anchorIndex;
+  }
+  syncStructureEndpointRefs();
+  markAnnotationsDirty();
+  return anchorIndex;
 }
 
 async function refreshReprojectExtensionProjection(): Promise<void> {
@@ -3898,6 +3973,10 @@ function createManualModeCropResultSvg(
     reprojectMode && reprojectHoverVertex
       ? (knownReprojectVertices.find((vertex) => vertex.vertexIndex === reprojectHoverVertex!.vertexIndex) ?? null)
       : null;
+  const activeReprojectAnchorCandidateVertex =
+    reprojectMode && reprojectAnchorCandidateVertex
+      ? reprojectAnchorCandidateVertex
+      : null;
   if (reprojectMode && reprojectSelectedVertex && !activeReprojectVertex) {
     clearReprojectSelectionAndExtension();
   }
@@ -4047,6 +4126,9 @@ function createManualModeCropResultSvg(
   if (reprojectMode && activeReprojectHoverVertex) {
     SvgUtils.appendSvgPointDot(sceneGroup, activeReprojectHoverVertex.point, "#ffe46b", 2.8);
   }
+  if (reprojectMode && activeReprojectAnchorCandidateVertex) {
+    SvgUtils.appendSvgPointDot(sceneGroup, activeReprojectAnchorCandidateVertex.point, "#ffb347", 3.1);
+  }
   if (reprojectMode && activeReprojectVertex) {
     const point = activeReprojectVertex.point;
     SvgUtils.appendSvgPointDot(sceneGroup, point, "#5ca8ff", 2.8);
@@ -4151,6 +4233,24 @@ function createManualModeCropResultSvg(
       return;
     }
     if (reprojectMode) {
+      const hitRadius = getAnchorPointerHitRadiusInImagePixels();
+      const nearestStructureVertex = findNearestStructureVertex(point);
+      if (
+        nearestStructureVertex &&
+        Math.hypot(nearestStructureVertex.point.x - point.x, nearestStructureVertex.point.y - point.y) <= hitRadius &&
+        reprojectSelectedVertex &&
+        reprojectExtensionSteps.length > 0
+      ) {
+        const createdAnchorIndex = tryCreateAnchorFromReprojectExtensionAtVertex(nearestStructureVertex);
+        if (createdAnchorIndex !== null) {
+          setManualInteractionMode("anchor");
+          setManualAnchorSelection(createdAnchorIndex);
+          manualAnchorHoveredVertex = nearestStructureVertex;
+          event.preventDefault();
+          renderCropResultFromCache();
+          return;
+        }
+      }
       const nearestVertex = (() => {
         let best: ReprojectKnownVertex | null = null;
         let bestDistance = Number.POSITIVE_INFINITY;
@@ -4163,10 +4263,10 @@ function createManualModeCropResultSvg(
         });
         return { vertex: best, distance: bestDistance };
       })();
-      const hitRadius = getAnchorPointerHitRadiusInImagePixels();
       if (!nearestVertex.vertex || !(nearestVertex.distance <= hitRadius)) {
         clearReprojectSelectionAndExtension();
         reprojectHoverVertex = null;
+        reprojectAnchorCandidateVertex = null;
         event.preventDefault();
         renderCropResultFromCache();
         return;
@@ -4176,6 +4276,7 @@ function createManualModeCropResultSvg(
         reprojectSelectedVertex.vertexIndex === nearestVertex.vertex.vertexIndex;
       reprojectSelectedVertex = nearestVertex.vertex;
       reprojectHoverVertex = nearestVertex.vertex;
+      reprojectAnchorCandidateVertex = null;
       if (!alreadySelected) {
         reprojectExtensionSteps = [];
         reprojectExtensionProjectedPoints = [];
@@ -4725,6 +4826,7 @@ function applyImportedMcvState(data: {
   vertexSolveRenderData = null;
   vertexSolveHoveredVertexIndex = null;
   reprojectHoverVertex = null;
+  reprojectAnchorCandidateVertex = null;
   clearReprojectSelectionAndExtension();
   poseSolveState = null;
   poseSolveRunToken += 1;
