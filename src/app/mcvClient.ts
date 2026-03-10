@@ -1,6 +1,11 @@
 import { wrapDegrees180 } from "./geometry";
 
-type McvOperation = "cv.poseSolve" | "cv.precomputeSobel" | "cv.clearCache" | "cv.opopRefineLine";
+type McvOperation =
+  | "cv.poseSolve"
+  | "cv.precomputeSobel"
+  | "cv.clearCache"
+  | "cv.opopRefineLine"
+  | "cv.projectWorldPoints";
 
 type McvRequest<TArgs = Record<string, unknown>> = {
   op: McvOperation;
@@ -86,12 +91,27 @@ type McvPoseSolveResult = {
     yaw: number;
     pitch: number;
   };
+  rvec?: [number, number, number];
+  tvec?: [number, number, number];
   tp_command: string;
   reprojected_lines?: Array<{
     line_index: number;
     from: { x: number; y: number };
     to: { x: number; y: number };
   }>;
+};
+
+type McvProjectWorldPointsArgs = {
+  points: Array<{ x: number; y: number; z: number }>;
+  width: number;
+  height: number;
+  focal_px: number;
+  rvec: [number, number, number];
+  tvec: [number, number, number];
+};
+
+type McvProjectWorldPointsResult = {
+  points: Array<{ x: number; y: number }>;
 };
 
 type McvSobelPrecomputeArgs = {
@@ -174,6 +194,7 @@ type McvClientConfig = {
 type McvClientRuntime = {
   callMcvApi: <TData>(requestBody: McvRequest) => Promise<McvResponse<TData>>;
   runPoseSolve: (args: McvPoseSolveArgs) => Promise<McvPoseSolveResult>;
+  runProjectWorldPoints: (args: McvProjectWorldPointsArgs) => Promise<McvProjectWorldPointsResult>;
   runOpopRefineLine: (
     imageDataUrl: string,
     line: McvOpopLine,
@@ -920,6 +941,89 @@ function buildReprojectedLinesWeb(
   }
 }
 
+function runWebProjectWorldPoints(cv: any, args: McvProjectWorldPointsArgs): McvProjectWorldPointsResult {
+  const width = Math.floor(Number(args.width));
+  const height = Math.floor(Number(args.height));
+  const focal = Number(args.focal_px);
+  const rvec = Array.isArray(args.rvec) ? args.rvec : [];
+  const tvec = Array.isArray(args.tvec) ? args.tvec : [];
+  const points = Array.isArray(args.points) ? args.points : [];
+  if (
+    !Number.isFinite(width) ||
+    !Number.isFinite(height) ||
+    width <= 0 ||
+    height <= 0 ||
+    !Number.isFinite(focal) ||
+    focal <= 0 ||
+    rvec.length < 3 ||
+    tvec.length < 3 ||
+    ![rvec[0], rvec[1], rvec[2], tvec[0], tvec[1], tvec[2]].every((value) => Number.isFinite(value))
+  ) {
+    throw new Error("Invalid projection arguments");
+  }
+  if (points.length === 0) {
+    return { points: [] };
+  }
+  const objectData: number[] = [];
+  points.forEach((point) => {
+    const x = Number(point?.x);
+    const y = Number(point?.y);
+    const z = Number(point?.z);
+    if (![x, y, z].every((value) => Number.isFinite(value))) {
+      throw new Error("All world points must be finite");
+    }
+    objectData.push(x, y, z);
+  });
+
+  let camera: any = null;
+  let dist: any = null;
+  let rvecMat: any = null;
+  let tvecMat: any = null;
+  let objectPts: any = null;
+  let projected: any = null;
+  try {
+    camera = cameraMatrixFromFocalWeb(cv, focal, width, height);
+    dist = cv.Mat.zeros(4, 1, cv.CV_64FC1);
+    rvecMat = cv.matFromArray(3, 1, cv.CV_64FC1, [rvec[0], rvec[1], rvec[2]]);
+    tvecMat = cv.matFromArray(3, 1, cv.CV_64FC1, [tvec[0], tvec[1], tvec[2]]);
+    objectPts = cv.matFromArray(points.length, 1, cv.CV_64FC3, objectData);
+    projected = new cv.Mat();
+    cv.projectPoints(objectPts, rvecMat, tvecMat, camera, dist, projected);
+    const data64 = projected.data64F as Float64Array | undefined;
+    const data32 = projected.data32F as Float32Array | undefined;
+    const out: Array<{ x: number; y: number }> = [];
+    for (let index = 0; index < points.length; index += 1) {
+      const offset = index * 2;
+      const px = data64 && data64.length > offset + 1 ? Number(data64[offset]) : Number(data32?.[offset]);
+      const py = data64 && data64.length > offset + 1 ? Number(data64[offset + 1]) : Number(data32?.[offset + 1]);
+      if (!Number.isFinite(px) || !Number.isFinite(py)) {
+        throw new Error("OpenCV projectPoints returned invalid output");
+      }
+      out.push({ x: px, y: py });
+    }
+    return { points: out };
+  } finally {
+    if (projected && typeof projected.delete === "function") {
+      projected.delete();
+    }
+    if (objectPts && typeof objectPts.delete === "function") {
+      objectPts.delete();
+    }
+    if (tvecMat && typeof tvecMat.delete === "function") {
+      tvecMat.delete();
+    }
+    if (rvecMat && typeof rvecMat.delete === "function") {
+      rvecMat.delete();
+    }
+    if (dist && typeof dist.delete === "function") {
+      dist.delete();
+    }
+    if (camera && typeof camera.delete === "function") {
+      camera.delete();
+    }
+  }
+}
+
 function cameraMatrixFromFocalWeb(cv: any, focal: number, width: number, height: number): any {
   const cx = (width - 1) * 0.5;
   const cy = (height - 1) * 0.5;
@@ -1351,6 +1455,8 @@ async function runWebPoseSolve(
       yaw: worldPose.yaw,
       pitch: worldPose.pitch,
     },
+    rvec: [bestPose.rvec[0], bestPose.rvec[1], bestPose.rvec[2]],
+    tvec: [bestPose.tvec[0], bestPose.tvec[1], bestPose.tvec[2]],
     tp_command: tpCommand,
     reprojected_lines: reprojectedLines,
   };
@@ -1394,6 +1500,23 @@ export function createMcvClient(config: McvClientConfig): McvClientRuntime {
     });
     if (!response.ok) {
       throw new Error(response.error.message || "Pose solve failed");
+    }
+    return response.data;
+  }
+
+  async function runProjectWorldPoints(
+    args: McvProjectWorldPointsArgs
+  ): Promise<McvProjectWorldPointsResult> {
+    if (config.backend === "web") {
+      const cv = await getWebMcvRuntime();
+      return runWebProjectWorldPoints(cv, args);
+    }
+    const response = await callMcvApi<McvProjectWorldPointsResult>({
+      op: "cv.projectWorldPoints",
+      args,
+    });
+    if (!response.ok) {
+      throw new Error(response.error.message || "World projection failed");
     }
     return response.data;
   }
@@ -1551,6 +1674,23 @@ export function createMcvClient(config: McvClientConfig): McvClientRuntime {
             data,
           } as McvResponse<TData>;
         }
+        if (requestBody.op === "cv.projectWorldPoints") {
+          const args = requestBody.args as McvProjectWorldPointsArgs | undefined;
+          if (!args) {
+            return {
+              ok: false,
+              error: {
+                code: "INVALID_ARGS",
+                message: "args are required for cv.projectWorldPoints",
+              },
+            };
+          }
+          const data = await runProjectWorldPoints(args);
+          return {
+            ok: true,
+            data,
+          } as McvResponse<TData>;
+        }
         return {
           ok: false,
           error: {
@@ -1615,6 +1755,7 @@ export function createMcvClient(config: McvClientConfig): McvClientRuntime {
   return {
     callMcvApi,
     runPoseSolve,
+    runProjectWorldPoints,
     runOpopRefineLine,
     prepareSobelCache,
     clearSobelCache,

@@ -8,7 +8,12 @@ import {
   buildPoseCorrespondencesFromStructure as buildPoseCorrespondencesFromStructureImpl,
   createMcvClient,
 } from "./app/mcvClient";
-type McvOperation = "cv.poseSolve" | "cv.precomputeSobel" | "cv.clearCache" | "cv.opopRefineLine";
+type McvOperation =
+  | "cv.poseSolve"
+  | "cv.precomputeSobel"
+  | "cv.clearCache"
+  | "cv.opopRefineLine"
+  | "cv.projectWorldPoints";
 
 type McvRequest<TArgs = Record<string, unknown>> = {
   op: McvOperation;
@@ -76,8 +81,20 @@ type McvPoseSolveResult = {
     yaw: number;
     pitch: number;
   };
+  rvec?: [number, number, number];
+  tvec?: [number, number, number];
   tp_command: string;
   reprojected_lines?: McvReprojectedLine[];
+};
+
+type McvProjectWorldPoint = {
+  x: number;
+  y: number;
+  z: number;
+};
+
+type McvProjectWorldPointsResult = {
+  points: ManualPoint[];
 };
 
 type McvOpopRefineLineResult = {
@@ -213,6 +230,17 @@ type VertexSolveCoord = {
   y?: number;
   z?: number;
 };
+type ReprojectExtensionStep = {
+  axis: ManualAxis;
+  direction: 1 | -1;
+  length: number;
+};
+type ReprojectKnownVertex = {
+  vertexIndex: number;
+  world: McvProjectWorldPoint;
+  lineIndexes: number[];
+  point: ManualPoint;
+};
 
 type McvMediaApi = {
   url: string;
@@ -232,6 +260,7 @@ type McvClientApi = {
     call: typeof callMcvApi;
     runPoseSolve: typeof runPoseSolve;
     runOpopRefineLine: typeof runOpopRefineLine;
+    runProjectWorldPoints: typeof runProjectWorldPoints;
     prepareSobelCache: typeof prepareSobelCache;
     clearSobelCache: typeof clearSobelCache;
     opop: {
@@ -387,6 +416,11 @@ let manualEditHoveredLineIndex: number | null = null;
 let manualEditSelectedLineIndex: number | null = null;
 let vertexSolveRenderData: VertexSolveRenderData | null = null;
 let vertexSolveHoveredVertexIndex: number | null = null;
+let reprojectHoverVertex: ReprojectKnownVertex | null = null;
+let reprojectSelectedVertex: ReprojectKnownVertex | null = null;
+let reprojectExtensionSteps: ReprojectExtensionStep[] = [];
+let reprojectExtensionProjectedPoints: ManualPoint[] = [];
+let reprojectExtensionProjectionToken = 0;
 let poseSolveReferenceInput = "";
 let poseSolveState:
   | {
@@ -929,6 +963,8 @@ function resetCropInteractionState(): void {
   manualEditSelectedLineIndex = null;
   vertexSolveRenderData = null;
   vertexSolveHoveredVertexIndex = null;
+  reprojectHoverVertex = null;
+  clearReprojectSelectionAndExtension();
   poseSolveState = null;
   poseSolveRunToken += 1;
   manualAxisStartsBackwards = false;
@@ -958,6 +994,17 @@ function wrapDegrees180(angleDeg: number): number {
 
 async function runPoseSolve(args: McvPoseSolveArgs): Promise<McvPoseSolveResult> {
   return await mcvRuntime.runPoseSolve(args);
+}
+
+async function runProjectWorldPoints(args: {
+  points: McvProjectWorldPoint[];
+  width: number;
+  height: number;
+  focal_px: number;
+  rvec: [number, number, number];
+  tvec: [number, number, number];
+}): Promise<McvProjectWorldPointsResult> {
+  return await mcvRuntime.runProjectWorldPoints(args);
 }
 
 async function runOpopRefineLine(
@@ -1135,6 +1182,7 @@ function installGlobalApi(): void {
       call: callMcvApi,
       runPoseSolve: runPoseSolve,
       runOpopRefineLine: runOpopRefineLine,
+      runProjectWorldPoints: runProjectWorldPoints,
       prepareSobelCache: prepareSobelCache,
       clearSobelCache: clearSobelCache,
       opop: {
@@ -1920,7 +1968,11 @@ function setManualInteractionMode(mode: ManualInteractionMode): void {
     resetPoseSolveState();
   }
   manualInteractionMode = mode;
+  if (mode !== "reproject") {
+    reprojectHoverVertex = null;
+  }
   if (mode === "anchor") {
+    clearReprojectSelectionAndExtension();
     manualDraftLine = null;
     manualDragPointerId = null;
     manualEditHoveredLineIndex = null;
@@ -1928,6 +1980,7 @@ function setManualInteractionMode(mode: ManualInteractionMode): void {
     vertexSolveRenderData = null;
     vertexSolveHoveredVertexIndex = null;
   } else if (mode === "edit") {
+    clearReprojectSelectionAndExtension();
     manualDraftLine = null;
     manualDragPointerId = null;
     manualAnchorHoveredVertex = null;
@@ -1936,6 +1989,7 @@ function setManualInteractionMode(mode: ManualInteractionMode): void {
     vertexSolveRenderData = null;
     vertexSolveHoveredVertexIndex = null;
   } else if (mode === "vertexSolve") {
+    clearReprojectSelectionAndExtension();
     resetPoseSolveState();
     manualDraftLine = null;
     manualDragPointerId = null;
@@ -1947,6 +2001,7 @@ function setManualInteractionMode(mode: ManualInteractionMode): void {
     vertexSolveRenderData = runVertexSolveAndBuildData();
     vertexSolveHoveredVertexIndex = null;
   } else if (mode === "poseSolve") {
+    clearReprojectSelectionAndExtension();
     manualDraftLine = null;
     manualDragPointerId = null;
     manualAnchorHoveredVertex = null;
@@ -1959,6 +2014,8 @@ function setManualInteractionMode(mode: ManualInteractionMode): void {
     }
     vertexSolveHoveredVertexIndex = null;
   } else if (mode === "reproject") {
+    clearReprojectSelectionAndExtension();
+    reprojectHoverVertex = null;
     manualDraftLine = null;
     manualDragPointerId = null;
     manualAnchorHoveredVertex = null;
@@ -1971,6 +2028,7 @@ function setManualInteractionMode(mode: ManualInteractionMode): void {
     }
     vertexSolveHoveredVertexIndex = null;
   } else {
+    clearReprojectSelectionAndExtension();
     manualAnchorHoveredVertex = null;
     manualAnchorSelectedIndex = null;
     manualAnchorSelectedInput = "";
@@ -2335,9 +2393,49 @@ function findNearestAnchorIndex(point: ManualPoint): number {
 }
 
 function updateAnchorHoverFromClient(clientX: number, clientY: number): void {
-  if (!cropResultCache || getManualInteractionMode() !== "anchor") {
+  const mode = getManualInteractionMode();
+  if (!cropResultCache || (mode !== "anchor" && mode !== "reproject")) {
     if (manualAnchorHoveredVertex !== null) {
       manualAnchorHoveredVertex = null;
+      renderCropResultFromCache();
+    }
+    if (reprojectHoverVertex !== null) {
+      reprojectHoverVertex = null;
+      renderCropResultFromCache();
+    }
+    return;
+  }
+  if (mode === "reproject") {
+    const point = getCropPointFromClient(clientX, clientY, cropResultCache.width, cropResultCache.height);
+    const knownVertices = buildReprojectKnownVertices(
+      poseSolveState?.status === "done" ? poseSolveState.result : undefined
+    );
+    if (!point || knownVertices.length === 0) {
+      if (reprojectHoverVertex !== null) {
+        reprojectHoverVertex = null;
+        renderCropResultFromCache();
+      }
+      return;
+    }
+    let next: ReprojectKnownVertex | null = null;
+    let bestDistance = Number.POSITIVE_INFINITY;
+    knownVertices.forEach((vertex) => {
+      const distance = Math.hypot(vertex.point.x - point.x, vertex.point.y - point.y);
+      if (distance < bestDistance) {
+        bestDistance = distance;
+        next = vertex;
+      }
+    });
+    if (!next) {
+      if (reprojectHoverVertex !== null) {
+        reprojectHoverVertex = null;
+        renderCropResultFromCache();
+      }
+      return;
+    }
+    const changed = !reprojectHoverVertex || reprojectHoverVertex.vertexIndex !== next.vertexIndex;
+    if (changed) {
+      reprojectHoverVertex = next;
       renderCropResultFromCache();
     }
     return;
@@ -2382,6 +2480,251 @@ function findNearestStructureVertex(point: ManualPoint): StructureVertex | null 
     }
   });
   return best;
+}
+
+function clearReprojectSelectionAndExtension(): void {
+  reprojectExtensionProjectionToken += 1;
+  reprojectSelectedVertex = null;
+  reprojectExtensionSteps = [];
+  reprojectExtensionProjectedPoints = [];
+}
+
+function buildReprojectedLineMap(result?: McvPoseSolveResult): Map<number, McvReprojectedLine> {
+  const mapped = new Map<number, McvReprojectedLine>();
+  const reprojected = result?.reprojected_lines ?? [];
+  reprojected.forEach((line) => {
+    mapped.set(line.line_index, line);
+  });
+  return mapped;
+}
+
+function getPoseProjectionInputs(result?: McvPoseSolveResult): {
+  width: number;
+  height: number;
+  focal_px: number;
+  rvec: [number, number, number];
+  tvec: [number, number, number];
+} | null {
+  if (!result) {
+    return null;
+  }
+  const rvec = Array.isArray(result.rvec) ? result.rvec : null;
+  const tvec = Array.isArray(result.tvec) ? result.tvec : null;
+  if (
+    !rvec ||
+    !tvec ||
+    rvec.length < 3 ||
+    tvec.length < 3 ||
+    ![rvec[0], rvec[1], rvec[2], tvec[0], tvec[1], tvec[2]].every((value) => Number.isFinite(value))
+  ) {
+    return null;
+  }
+  return {
+    width: result.image_width,
+    height: result.image_height,
+    focal_px: result.optimized_focal_px,
+    rvec: [rvec[0], rvec[1], rvec[2]],
+    tvec: [tvec[0], tvec[1], tvec[2]],
+  };
+}
+
+function getReprojectVertexPoint(
+  vertex: StructureVertexData,
+  reprojectedByLine: Map<number, McvReprojectedLine>
+): ManualPoint {
+  let sumX = 0;
+  let sumY = 0;
+  let count = 0;
+  vertex.from.forEach((lineIndex) => {
+    const endpointKey = "from";
+    const projected = reprojectedByLine.get(lineIndex);
+    if (projected) {
+      const point = projected[endpointKey];
+      sumX += point.x;
+      sumY += point.y;
+      count += 1;
+      return;
+    }
+    const sourceLine = MCV_DATA.structure.lines[lineIndex];
+    if (!sourceLine) {
+      return;
+    }
+    sumX += sourceLine[endpointKey].x;
+    sumY += sourceLine[endpointKey].y;
+    count += 1;
+  });
+  vertex.to.forEach((lineIndex) => {
+    const endpointKey = "to";
+    const projected = reprojectedByLine.get(lineIndex);
+    if (projected) {
+      const point = projected[endpointKey];
+      sumX += point.x;
+      sumY += point.y;
+      count += 1;
+      return;
+    }
+    const sourceLine = MCV_DATA.structure.lines[lineIndex];
+    if (!sourceLine) {
+      return;
+    }
+    sumX += sourceLine[endpointKey].x;
+    sumY += sourceLine[endpointKey].y;
+    count += 1;
+  });
+  if (count <= 0) {
+    const fallback = getVertexDotPoint(vertex);
+    return fallback ?? { x: 0, y: 0 };
+  }
+  return {
+    x: sumX / count,
+    y: sumY / count,
+  };
+}
+
+function buildReprojectKnownVertices(result?: McvPoseSolveResult): ReprojectKnownVertex[] {
+  const reprojectedByLine = buildReprojectedLineMap(result);
+  const known: ReprojectKnownVertex[] = [];
+  MCV_DATA.structure.vertices.forEach((vertex, vertexIndex) => {
+    if (![vertex.x, vertex.y, vertex.z].every((value) => Number.isFinite(value))) {
+      return;
+    }
+    const lineIndexes = Geometry.normalizeLineRefs([...vertex.from, ...vertex.to]);
+    known.push({
+      vertexIndex,
+      world: {
+        x: Number(vertex.x),
+        y: Number(vertex.y),
+        z: Number(vertex.z),
+      },
+      lineIndexes,
+      point: getReprojectVertexPoint(vertex, reprojectedByLine),
+    });
+  });
+  return known;
+}
+
+function applyReprojectExtensionStep(axis: ManualAxis, direction: 1 | -1): boolean {
+  if (getManualInteractionMode() !== "reproject") {
+    return false;
+  }
+  if (!reprojectSelectedVertex) {
+    return false;
+  }
+  const last = reprojectExtensionSteps[reprojectExtensionSteps.length - 1];
+  if (last && last.axis === axis && last.direction === direction) {
+    last.length += 1;
+  } else if (last && last.axis === axis && last.direction === -direction) {
+    if (last.length > 1) {
+      last.length -= 1;
+    } else {
+      reprojectExtensionSteps.pop();
+    }
+  } else {
+    reprojectExtensionSteps.push({
+      axis,
+      direction,
+      length: 1,
+    });
+  }
+  reprojectExtensionProjectedPoints = [];
+  void refreshReprojectExtensionProjection();
+  return true;
+}
+
+function buildReprojectExtensionWorldPoints(selectedVertex: ReprojectKnownVertex): McvProjectWorldPoint[] {
+  const points: McvProjectWorldPoint[] = [
+    {
+      x: selectedVertex.world.x,
+      y: selectedVertex.world.y,
+      z: selectedVertex.world.z,
+    },
+  ];
+  let cursor: McvProjectWorldPoint = {
+    x: selectedVertex.world.x,
+    y: selectedVertex.world.y,
+    z: selectedVertex.world.z,
+  };
+  reprojectExtensionSteps.forEach((step) => {
+    const delta = step.length * step.direction;
+    const next: McvProjectWorldPoint = {
+      x: cursor.x + (step.axis === "x" ? delta : 0),
+      y: cursor.y + (step.axis === "y" ? delta : 0),
+      z: cursor.z + (step.axis === "z" ? delta : 0),
+    };
+    points.push(next);
+    cursor = next;
+  });
+  return points;
+}
+
+async function refreshReprojectExtensionProjection(): Promise<void> {
+  const token = ++reprojectExtensionProjectionToken;
+  if (getManualInteractionMode() !== "reproject" || !reprojectSelectedVertex || reprojectExtensionSteps.length === 0) {
+    if (reprojectExtensionProjectedPoints.length > 0) {
+      reprojectExtensionProjectedPoints = [];
+      renderCropResultFromCache();
+    }
+    return;
+  }
+  const poseResult = poseSolveState?.status === "done" ? poseSolveState.result : undefined;
+  const projectionInputs = getPoseProjectionInputs(poseResult);
+  if (!projectionInputs) {
+    if (reprojectExtensionProjectedPoints.length > 0) {
+      reprojectExtensionProjectedPoints = [];
+      renderCropResultFromCache();
+    }
+    return;
+  }
+  const worldPoints = buildReprojectExtensionWorldPoints(reprojectSelectedVertex);
+  try {
+    const result = await runProjectWorldPoints({
+      points: worldPoints,
+      width: projectionInputs.width,
+      height: projectionInputs.height,
+      focal_px: projectionInputs.focal_px,
+      rvec: projectionInputs.rvec,
+      tvec: projectionInputs.tvec,
+    });
+    if (token !== reprojectExtensionProjectionToken) {
+      return;
+    }
+    reprojectExtensionProjectedPoints = (result.points ?? [])
+      .filter((point) => Number.isFinite(point.x) && Number.isFinite(point.y))
+      .map((point) => ({ x: point.x, y: point.y }));
+    renderCropResultFromCache();
+  } catch {
+    if (token !== reprojectExtensionProjectionToken) {
+      return;
+    }
+    if (reprojectExtensionProjectedPoints.length > 0) {
+      reprojectExtensionProjectedPoints = [];
+      renderCropResultFromCache();
+    }
+  }
+}
+
+function buildReprojectExtensionRenderSegments(
+  selectedVertex: ReprojectKnownVertex
+): Array<{ axis: ManualAxis; from: ManualPoint; to: ManualPoint; length: number }> {
+  if (
+    reprojectExtensionSteps.length === 0 ||
+    reprojectExtensionProjectedPoints.length !== reprojectExtensionSteps.length + 1
+  ) {
+    return [];
+  }
+  const segments: Array<{ axis: ManualAxis; from: ManualPoint; to: ManualPoint; length: number }> = [];
+  for (let index = 0; index < reprojectExtensionSteps.length; index += 1) {
+    const step = reprojectExtensionSteps[index];
+    const fromPoint = reprojectExtensionProjectedPoints[index];
+    const toPoint = reprojectExtensionProjectedPoints[index + 1];
+    segments.push({
+      axis: step.axis,
+      from: { x: fromPoint.x, y: fromPoint.y },
+      to: { x: toPoint.x, y: toPoint.y },
+      length: step.length,
+    });
+  }
+  return segments;
 }
 
 function purgeGeneratedVerticesKeepingAnchors(): void {
@@ -3546,14 +3889,41 @@ function createManualModeCropResultSvg(
   const reprojectedLines = reprojectMode
     ? (poseResult?.reprojected_lines ?? [])
     : [];
+  const knownReprojectVertices = reprojectMode ? buildReprojectKnownVertices(poseResult) : [];
+  const activeReprojectVertex =
+    reprojectMode && reprojectSelectedVertex
+      ? (knownReprojectVertices.find((vertex) => vertex.vertexIndex === reprojectSelectedVertex!.vertexIndex) ?? null)
+      : null;
+  const activeReprojectHoverVertex =
+    reprojectMode && reprojectHoverVertex
+      ? (knownReprojectVertices.find((vertex) => vertex.vertexIndex === reprojectHoverVertex!.vertexIndex) ?? null)
+      : null;
+  if (reprojectMode && reprojectSelectedVertex && !activeReprojectVertex) {
+    clearReprojectSelectionAndExtension();
+  }
+  if (reprojectMode && reprojectHoverVertex && !activeReprojectHoverVertex) {
+    reprojectHoverVertex = null;
+  }
 
   const anchorLightIndexes = new Set<number>();
-  if (anchorMode) {
+  if (anchorMode || reprojectMode) {
     if (manualAnchorHoveredVertex) {
       manualAnchorHoveredVertex.lineIndexes.forEach((lineIndex) => {
         anchorLightIndexes.add(lineIndex);
       });
     }
+    if (activeReprojectHoverVertex) {
+      activeReprojectHoverVertex.lineIndexes.forEach((lineIndex) => {
+        anchorLightIndexes.add(lineIndex);
+      });
+    }
+    if (activeReprojectVertex) {
+      activeReprojectVertex.lineIndexes.forEach((lineIndex) => {
+        anchorLightIndexes.add(lineIndex);
+      });
+    }
+  }
+  if (anchorMode) {
     if (manualAnchorSelectedIndex !== null) {
       const selectedAnchor = MCV_DATA.structure.anchors[manualAnchorSelectedIndex];
       if (selectedAnchor) {
@@ -3565,15 +3935,48 @@ function createManualModeCropResultSvg(
   }
 
   if (reprojectMode) {
+    const solvedLineIndexes = new Set<number>();
     reprojectedLines.forEach((line) => {
       const sourceLine = MCV_DATA.structure.lines[line.line_index];
       if (!sourceLine) {
         return;
       }
-      const axisColor = SvgUtils.getAxisColor(sourceLine.axis);
+      solvedLineIndexes.add(line.line_index);
+      const axisColor = anchorLightIndexes.has(line.line_index)
+        ? SvgUtils.getAxisLightColor(sourceLine.axis)
+        : SvgUtils.getAxisColor(sourceLine.axis);
       const segment: McvLineSegment = [line.from.x, line.from.y, line.to.x, line.to.y];
       SvgUtils.appendSvgLine(sceneGroup, segment, axisColor, 2.2, 1);
     });
+    MCV_DATA.structure.lines.forEach((line, lineIndex) => {
+      if (solvedLineIndexes.has(lineIndex)) {
+        return;
+      }
+      const segment = SvgUtils.getLineSegmentForLine(line);
+      const stroke = anchorLightIndexes.has(lineIndex) ? SvgUtils.getAxisLightColor(line.axis) : "#ffffff";
+      SvgUtils.appendSvgLine(sceneGroup, segment, stroke, 2, 1);
+    });
+    if (activeReprojectVertex) {
+      const extensionSegments = buildReprojectExtensionRenderSegments(activeReprojectVertex);
+      extensionSegments.forEach((segment) => {
+        const axisColor = SvgUtils.getAxisColor(segment.axis);
+        const lineSegment: McvLineSegment = [
+          segment.from.x,
+          segment.from.y,
+          segment.to.x,
+          segment.to.y,
+        ];
+        SvgUtils.appendSvgLine(
+          sceneGroup,
+          lineSegment,
+          axisColor,
+          2.2,
+          1,
+          SvgUtils.getAxisMarkerId(segment.axis)
+        );
+        SvgUtils.appendSvgLineLabel(sceneGroup, lineSegment, segment.length, axisColor);
+      });
+    }
   } else {
     linesToRender.forEach((line, index) => {
       const opopAnimation = opopLineAnimations.get(index) ?? null;
@@ -3637,9 +4040,16 @@ function createManualModeCropResultSvg(
         selected ? "#5ca8ff" : "#ffffff"
       );
     });
-    if (manualAnchorHoveredVertex) {
-      SvgUtils.appendSvgPointDot(sceneGroup, manualAnchorHoveredVertex.point, "#ffe46b", 2.8);
-    }
+  }
+  if (anchorMode && manualAnchorHoveredVertex) {
+    SvgUtils.appendSvgPointDot(sceneGroup, manualAnchorHoveredVertex.point, "#ffe46b", 2.8);
+  }
+  if (reprojectMode && activeReprojectHoverVertex) {
+    SvgUtils.appendSvgPointDot(sceneGroup, activeReprojectHoverVertex.point, "#ffe46b", 2.8);
+  }
+  if (reprojectMode && activeReprojectVertex) {
+    const point = activeReprojectVertex.point;
+    SvgUtils.appendSvgPointDot(sceneGroup, point, "#5ca8ff", 2.8);
   }
   if (vertexSolveMode && solveData) {
     MCV_DATA.structure.anchors.forEach((anchor) => {
@@ -3740,7 +4150,42 @@ function createManualModeCropResultSvg(
       renderCropResultFromCache();
       return;
     }
-    if (vertexSolveMode || reprojectMode) {
+    if (reprojectMode) {
+      const nearestVertex = (() => {
+        let best: ReprojectKnownVertex | null = null;
+        let bestDistance = Number.POSITIVE_INFINITY;
+        knownReprojectVertices.forEach((vertex) => {
+          const distance = Math.hypot(vertex.point.x - point.x, vertex.point.y - point.y);
+          if (distance < bestDistance) {
+            bestDistance = distance;
+            best = vertex;
+          }
+        });
+        return { vertex: best, distance: bestDistance };
+      })();
+      const hitRadius = getAnchorPointerHitRadiusInImagePixels();
+      if (!nearestVertex.vertex || !(nearestVertex.distance <= hitRadius)) {
+        clearReprojectSelectionAndExtension();
+        reprojectHoverVertex = null;
+        event.preventDefault();
+        renderCropResultFromCache();
+        return;
+      }
+      const alreadySelected =
+        !!reprojectSelectedVertex &&
+        reprojectSelectedVertex.vertexIndex === nearestVertex.vertex.vertexIndex;
+      reprojectSelectedVertex = nearestVertex.vertex;
+      reprojectHoverVertex = nearestVertex.vertex;
+      if (!alreadySelected) {
+        reprojectExtensionSteps = [];
+        reprojectExtensionProjectedPoints = [];
+      }
+      void refreshReprojectExtensionProjection();
+      event.preventDefault();
+      renderCropResultFromCache();
+      return;
+    }
+    if (vertexSolveMode) {
       event.preventDefault();
       return;
     }
@@ -3890,7 +4335,7 @@ function updateManualDraftFromPointer(pointer: PointerEvent): void {
     return;
   }
 
-  if (getManualInteractionMode() === "anchor") {
+  if (getManualInteractionMode() === "anchor" || getManualInteractionMode() === "reproject") {
     updateAnchorHoverFromClient(pointer.clientX, pointer.clientY);
     return;
   }
@@ -3905,10 +4350,6 @@ function updateManualDraftFromPointer(pointer: PointerEvent): void {
   if (getManualInteractionMode() === "poseSolve") {
     return;
   }
-  if (getManualInteractionMode() === "reproject") {
-    return;
-  }
-
   if (
     !cropResultCache ||
     manualDragPointerId === null ||
@@ -4282,6 +4723,9 @@ function applyImportedMcvState(data: {
   manualEditHoveredLineIndex = null;
   manualEditSelectedLineIndex = null;
   vertexSolveRenderData = null;
+  vertexSolveHoveredVertexIndex = null;
+  reprojectHoverVertex = null;
+  clearReprojectSelectionAndExtension();
   poseSolveState = null;
   poseSolveRunToken += 1;
   renderOpopPreviewHeld = false;
@@ -5196,7 +5640,9 @@ function handleViewerKeybind(event: KeyboardEvent): void {
       } else if (getManualInteractionMode() === "poseSolve") {
         // keep solve view active until explicit mode change
       } else if (getManualInteractionMode() === "reproject") {
-        // keep solve view active until explicit mode change
+        if (event.key === "Escape") {
+          clearReprojectSelectionAndExtension();
+        }
       } else if (manualDraftLine) {
         manualDraftLine = null;
         manualDragPointerId = null;
@@ -5300,6 +5746,30 @@ function handleViewerKeybind(event: KeyboardEvent): void {
         adjustDraftEdgeLength(-1);
       }
       return;
+    }
+
+    if (getManualInteractionMode() === "reproject") {
+      const reprojectStep =
+        event.key === "1" || event.code === "Numpad1"
+          ? { axis: "x" as ManualAxis, direction: 1 as 1 | -1 }
+          : event.key === "2" || event.code === "Numpad2"
+          ? { axis: "y" as ManualAxis, direction: 1 as 1 | -1 }
+          : event.key === "3" || event.code === "Numpad3"
+          ? { axis: "z" as ManualAxis, direction: 1 as 1 | -1 }
+          : event.key === "q" || event.key === "Q"
+          ? { axis: "x" as ManualAxis, direction: -1 as 1 | -1 }
+          : event.key === "w" || event.key === "W"
+          ? { axis: "y" as ManualAxis, direction: -1 as 1 | -1 }
+          : event.key === "e" || event.key === "E"
+          ? { axis: "z" as ManualAxis, direction: -1 as 1 | -1 }
+          : null;
+      if (reprojectStep) {
+        event.preventDefault();
+        if (applyReprojectExtensionStep(reprojectStep.axis, reprojectStep.direction)) {
+          renderCropResultFromCache();
+        }
+        return;
+      }
     }
 
     const applyAxisSelection = (axis: ManualAxis, startsBackwards: boolean) => {

@@ -873,8 +873,79 @@ def run_pose_solve(args):
             "yaw": float(yaw_deg),
             "pitch": float(pitch_deg),
         },
+        "rvec": [
+            float(best_rvec[0][0]),
+            float(best_rvec[1][0]),
+            float(best_rvec[2][0]),
+        ],
+        "tvec": [
+            float(best_tvec[0][0]),
+            float(best_tvec[1][0]),
+            float(best_tvec[2][0]),
+        ],
         "tp_command": tp_command,
         "reprojected_lines": reprojected_lines,
+    }
+
+
+def project_world_points(args):
+    if not isinstance(args, dict):
+        raise ValueError("args must be an object")
+    points_raw = args.get("points")
+    width_raw = args.get("width")
+    height_raw = args.get("height")
+    focal_raw = args.get("focal_px")
+    rvec_raw = args.get("rvec")
+    tvec_raw = args.get("tvec")
+    if not isinstance(points_raw, list):
+        raise ValueError("points must be an array")
+    if not isinstance(width_raw, (int, float)) or not isinstance(height_raw, (int, float)):
+        raise ValueError("width and height are required")
+    width = int(width_raw)
+    height = int(height_raw)
+    if width <= 0 or height <= 0:
+        raise ValueError("width and height must be positive")
+    focal = float(focal_raw)
+    if not np.isfinite(focal) or focal <= 0.0:
+        raise ValueError("focal_px must be positive")
+    if not isinstance(rvec_raw, (list, tuple)) or not isinstance(tvec_raw, (list, tuple)):
+        raise ValueError("rvec and tvec are required")
+    if len(rvec_raw) < 3 or len(tvec_raw) < 3:
+        raise ValueError("rvec and tvec must have 3 values")
+    rvec = np.array(
+        [float(rvec_raw[0]), float(rvec_raw[1]), float(rvec_raw[2])],
+        dtype=np.float64,
+    ).reshape(3, 1)
+    tvec = np.array(
+        [float(tvec_raw[0]), float(tvec_raw[1]), float(tvec_raw[2])],
+        dtype=np.float64,
+    ).reshape(3, 1)
+    if not np.all(np.isfinite(rvec)) or not np.all(np.isfinite(tvec)):
+        raise ValueError("rvec and tvec must be finite")
+    if len(points_raw) == 0:
+        return {"points": []}
+
+    object_rows = []
+    for entry in points_raw:
+        if not isinstance(entry, dict):
+            raise ValueError("Each point must be an object")
+        x = float(entry.get("x"))
+        y = float(entry.get("y"))
+        z = float(entry.get("z"))
+        if not (np.isfinite(x) and np.isfinite(y) and np.isfinite(z)):
+            raise ValueError("World points must be finite")
+        object_rows.append([x, y, z])
+    object_pts = np.array(object_rows, dtype=np.float64).reshape(-1, 1, 3)
+
+    k = _camera_matrix_from_focal(focal, width, height)
+    dist = np.zeros((4, 1), dtype=np.float64)
+    projected, _ = cv2.projectPoints(object_pts, rvec, tvec, k, dist)
+    projected = projected.reshape(-1, 2)
+    return {
+        "points": [
+            {"x": float(point[0]), "y": float(point[1])}
+            for point in projected.tolist()
+        ]
     }
 
 
@@ -952,6 +1023,22 @@ def api_mcv():
                         "ok": False,
                         "error": {
                             "code": "OPOP_REFINE_ERROR",
+                            "message": str(exc),
+                        },
+                    }
+                ),
+                400,
+            )
+    if op == "cv.projectWorldPoints":
+        try:
+            return jsonify({"ok": True, "data": project_world_points(args)})
+        except Exception as exc:
+            return (
+                jsonify(
+                    {
+                        "ok": False,
+                        "error": {
+                            "code": "PROJECT_WORLD_POINTS_ERROR",
                             "message": str(exc),
                         },
                     }

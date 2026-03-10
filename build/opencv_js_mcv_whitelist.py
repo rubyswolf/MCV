@@ -39,6 +39,7 @@ calib3d = {
         "solvePnP",
         "solvePnPRansac",
         "solvePnPRefineLM",
+        # Required for world-point reprojection (reproject extension path).
         "projectPoints",
     ],
 }
