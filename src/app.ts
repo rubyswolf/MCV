@@ -344,10 +344,10 @@ let currentViewerObjectUrl: string | null = null;
 let currentAnalyzedImageObjectUrl: string | null = null;
 let viewerVideoNode: HTMLVideoElement | null = null;
 let viewerHmsInput: HTMLInputElement | null = null;
+let viewerFpsInput: HTMLInputElement | null = null;
 let viewerEditingField: "hms" | null = null;
 let viewerActiveVideoContext: ViewerMedia | null = null;
-let viewerDetectedFps: number | null = null;
-let stopViewerFpsProbe: (() => void) | null = null;
+let viewerManualFps = 60;
 let viewerImageRenderToken = 0;
 let pendingImportedMcvState:
   | {
@@ -456,7 +456,7 @@ let mediaLibrary: MediaLibrary = {
 const NO_YOUTUBE_VIDEO_ERROR =
   "video is not provided by the Media API, please download the video yourself and upload it.";
 const NO_MEDIA_ID_ERROR = "media ID is not provided by the Media API.";
-const VIEWER_FPS_FALLBACK = ViewerController.VIEWER_FPS_FALLBACK;
+const VIEWER_MANUAL_FPS_DEFAULT = 60;
 // const movement = {speed: 1.0,friction: 1.0,grip: 1.0,stop: 1.0,slip: 0.0,buildup: 0,zoomSpeed: 0.001} //sharp
 // const movement = {speed: 1.0,friction: 0.05,grip: 1.0,stop: 1.0,slip: 0.0,buildup: 0,zoomSpeed: 0.001} //smooth
 const movement = {
@@ -471,31 +471,15 @@ const movement = {
 // const movement = {speed: 1.0,friction: 0.05,grip: 0.2,stop: 0.0,slip: 1.0,buildup: 0.5,zoomSpeed: 0.001} //gliding
 
 function getViewerFrameRate(): number {
-  return ViewerController.getViewerFrameRate(viewerDetectedFps, VIEWER_FPS_FALLBACK);
+  return ViewerController.getViewerFrameRate(viewerManualFps, VIEWER_MANUAL_FPS_DEFAULT);
 }
 
 function getViewerFrameDurationSeconds(): number {
-  return ViewerController.getViewerFrameDurationSeconds(viewerDetectedFps, VIEWER_FPS_FALLBACK);
+  return ViewerController.getViewerFrameDurationSeconds(viewerManualFps, VIEWER_MANUAL_FPS_DEFAULT);
 }
 
 function getViewerFrameBase(): number {
-  return ViewerController.getViewerFrameBase(viewerDetectedFps, VIEWER_FPS_FALLBACK);
-}
-
-function stopViewerFrameRateProbe(): void {
-  if (stopViewerFpsProbe) {
-    stopViewerFpsProbe();
-    stopViewerFpsProbe = null;
-  }
-  viewerDetectedFps = null;
-}
-
-function startViewerFrameRateProbe(video: HTMLVideoElement): void {
-  stopViewerFrameRateProbe();
-  const stopFn = ViewerController.startViewerFrameRateProbe(video, (fps) => {
-    viewerDetectedFps = fps;
-  });
-  stopViewerFpsProbe = stopFn || null;
+  return ViewerController.getViewerFrameBase(viewerManualFps, VIEWER_MANUAL_FPS_DEFAULT);
 }
 
 function linkStructureEndpoints(
@@ -1829,7 +1813,6 @@ function clearViewerFullImage(): void {
   resetCropInteractionState();
   hideViewerCropResult();
   removePoseSolvePanel();
-  stopViewerFrameRateProbe();
   refreshOpopStageVisibility();
 }
 
@@ -5191,10 +5174,18 @@ function renderVideoViewerUi(
   hmsInput.className = "time-input";
   hmsInput.type = "text";
   hmsInput.placeholder = "00:00:00|0";
+  const fpsInput = document.createElement("input");
+  fpsInput.className = "time-input fps-input";
+  fpsInput.type = "number";
+  fpsInput.min = "1";
+  fpsInput.step = "0.001";
+  fpsInput.placeholder = "FPS";
+  fpsInput.title = "Framerate (FPS)";
+  fpsInput.value = `${viewerManualFps}`;
   const hmsInputRow = document.createElement("div");
   hmsInputRow.className = "time-input-row";
   hmsInputRow.appendChild(hmsInput);
-
+  hmsInputRow.appendChild(fpsInput);
   const copyLinkButton = document.createElement("button");
   copyLinkButton.type = "button";
   copyLinkButton.className = "viewer-action-button";
@@ -5234,14 +5225,26 @@ function renderVideoViewerUi(
   viewerActiveVideoContext = videoContext;
   viewerVideoNode = videoNode;
   viewerHmsInput = hmsInput;
+  viewerFpsInput = fpsInput;
   viewerEditingField = null;
-  viewerDetectedFps = null;
-  startViewerFrameRateProbe(videoNode);
 
   const commitAndSync = () => {
     seekViewerFromInput();
     viewerEditingField = null;
     syncViewerTimeInputs(true);
+  };
+
+  const commitFpsInput = () => {
+    const raw = fpsInput.value.trim();
+    const parsed = Number.parseFloat(raw);
+    if (!Number.isFinite(parsed) || parsed <= 0) {
+      fpsInput.value = `${viewerManualFps}`;
+      return;
+    }
+    viewerManualFps = parsed;
+    fpsInput.value = `${viewerManualFps}`;
+    syncViewerTimeInputs(true);
+    updateMcvSourceVideoTimestampFromCurrentViewer();
   };
 
   hmsInput.addEventListener("focus", () => {
@@ -5260,6 +5263,8 @@ function renderVideoViewerUi(
     commitAndSync();
     hmsInput.blur();
   });
+  fpsInput.addEventListener("change", commitFpsInput);
+  fpsInput.addEventListener("blur", commitFpsInput);
 
   const updateEvents: Array<keyof HTMLMediaElementEventMap> = [
     "loadedmetadata",
@@ -5294,7 +5299,6 @@ function renderVideoViewerUi(
   });
 
   videoNode.addEventListener("emptied", () => {
-    viewerDetectedFps = null;
     syncViewerTimeInputs(true);
   });
 
@@ -5418,11 +5422,11 @@ function closeViewer(): void {
   viewerMedia = null;
   viewerVideoNode = null;
   viewerHmsInput = null;
+  viewerFpsInput = null;
   viewerEditingField = null;
   viewerActiveVideoContext = null;
   activeAnalyzeButton = null;
   pendingImportedVideoSourceForImageLoad = null;
-  stopViewerFrameRateProbe();
   clearViewerFullImage();
   void clearSobelCache("viewer_exit").catch(() => {
     // Ignore background cache-clear failures when leaving viewer.
@@ -5450,6 +5454,7 @@ function renderViewerScreen(): void {
   activeAnalyzeButton = null;
   viewerVideoNode = null;
   viewerHmsInput = null;
+  viewerFpsInput = null;
   viewerEditingField = null;
   viewerActiveVideoContext = null;
   refreshUnsavedActionUi();

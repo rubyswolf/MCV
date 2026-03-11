@@ -296,6 +296,12 @@ __MCV_BODY_STYLE__
       min-width: 220px;
       flex: 1 1 240px;
     }
+    .time-input.fps-input {
+      min-width: 88px;
+      width: 88px;
+      flex: 0 0 88px;
+      text-align: center;
+    }
     .time-input:focus {
       border-color: #4f6a85;
     }
