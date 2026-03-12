@@ -278,6 +278,36 @@ Behavior:
 - Includes reference input `x y z yaw pitch` with live error stats.
 - Press `D` again in pose solve mode to rerun solve.
 
+### Reprojection mode (`R`)
+
+Enter with:
+
+- `R` from pose solve mode after a successful solve.
+
+Behavior:
+
+- Solved lines render in axis colors.
+- Unsolved lines render white.
+- Nearest selectable vertex highlights as a yellow dot.
+- Selected vertex shows blue.
+
+Extensions:
+
+- Click a vertex to select it as the extension start.
+- Use keys to extend in world axes:
+  - `1` / `Q` -> `+X` / `-X`
+  - `2` / `W` -> `+Y` / `-Y`
+  - `3` / `E` -> `+Z` / `-Z`
+- Repeated keypresses in the same direction increase segment length.
+- Opposite keypresses reduce length and remove empty segments.
+- `Escape` clears selection and extension chain.
+
+Anchoring from extension:
+
+- While an extension is active, clicking any vertex anchors that vertex at the extension tip world position.
+- This works for unknown and already-known vertices.
+- After anchoring, MCV switches to anchor mode with that anchor selected for editing.
+
 ## 11. View navigation (pan/zoom)
 
 General behavior:
@@ -345,18 +375,18 @@ Load:
 
 Supported query parameters:
 
-- `?id=<media_id>&t=<seconds_or_time>&f=<frame>`
-- `?yt=<youtube_id>&t=<seconds_or_time>&f=<frame>`
+- `?id=<media_id>&t=<seconds_or_time>&f=<frame>&fps=<frames_per_second>`
+- `?yt=<youtube_id>&t=<seconds_or_time>&f=<frame>&fps=<frames_per_second>`
 
 Examples:
 
-- `?id=mcc11&t=100&f=30`
-- `?yt=jXfJpIQEIIg&t=1:24&f=0`
+- `?id=mcc11&t=100&f=30&fps=60`
+- `?yt=jXfJpIQEIIg&t=1:24&f=0&fps=120`
 
 Notes:
 
 - `id` is preferred over `yt` when building share links.
-- `f` is interpreted using detected FPS (fallback 30 when FPS is not yet known).
+- `f` is interpreted using `fps` when provided, otherwise using the current FPS input value.
 
 ## 15. Console APIs
 
@@ -391,5 +421,5 @@ Global objects:
   - `anchors: Array<{ from:number[], to:number[], vertex:number, x?,y?,z? }>`
   - `vertices: Array<{ from:number[], to:number[], anchor?, x?,y?,z? }>`
 - `source?`:
-  - Media API source: `{ type:'video'|'image', id, name, url, youtube_id?, seconds?, frames? }`
-  - Uploaded video source: `{ type:'video', filename, seconds, frames }`
+  - Media API source: `{ type:'video'|'image', id, name, url, youtube_id?, seconds?, frames?, fps? }`
+  - Uploaded video source: `{ type:'video', filename, seconds, frames, fps? }`

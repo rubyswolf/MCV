@@ -113,12 +113,14 @@ type McvMediaApiSource = {
   youtube_id?: string;
   seconds?: number;
   frames?: number;
+  fps?: number;
 };
 type McvUploadedVideoSource = {
   type: "video";
   filename: string;
   seconds: number;
   frames: number;
+  fps?: number;
 };
 type McvDataSource = McvMediaApiSource | McvUploadedVideoSource;
 type ManualAxis = "x" | "y" | "z";
@@ -316,6 +318,7 @@ type LaunchSelectionIntent = {
   value: string;
   tRaw: string;
   fRaw: string;
+  fpsRaw: string;
 };
 
 declare global {
@@ -4627,7 +4630,12 @@ function splitSecondsAndFrames(secondsValue: number): { seconds: number; frames:
 }
 
 function buildMcvSourceFromViewer(viewer: ViewerMedia): McvDataSource | null {
-  return MediaController.buildMcvSourceFromViewer(mediaLibrary, viewer, getViewerFrameBase());
+  return MediaController.buildMcvSourceFromViewer(
+    mediaLibrary,
+    viewer,
+    getViewerFrameBase(),
+    getViewerFrameRate()
+  );
 }
 
 function resolveVideoViewerFromSource(source: McvDataSource): ViewerMedia | null {
@@ -4646,6 +4654,7 @@ function parseLaunchSelectionIntent(): LaunchSelectionIntent | null {
 function buildLaunchSeekInfo(intent: LaunchSelectionIntent): {
   initialSeekSeconds?: number;
   timestampLabel?: string;
+  fps?: number;
 } {
   return MediaController.buildLaunchSeekInfo(
     intent,
@@ -4686,6 +4695,9 @@ function applyLaunchSelectionIfAny(): void {
   }
 
   const seekInfo = buildLaunchSeekInfo(intent);
+  if (seekInfo.fps !== undefined) {
+    viewerManualFps = seekInfo.fps;
+  }
   if (seekInfo.initialSeekSeconds !== undefined) {
     target.initialSeekSeconds = seekInfo.initialSeekSeconds;
   }
@@ -5056,6 +5068,7 @@ function updateMcvSourceVideoTimestampFromCurrentViewer(): void {
       filename: viewerActiveVideoContext.title,
       seconds,
       frames: frame,
+      fps: getViewerFrameRate(),
     };
     return;
   }
@@ -5076,6 +5089,7 @@ function updateMcvSourceVideoTimestampFromCurrentViewer(): void {
   }
   MCV_DATA.source.seconds = seconds;
   MCV_DATA.source.frames = frame;
+  MCV_DATA.source.fps = getViewerFrameRate();
 }
 
 function getShareBaseUrl(): URL {
@@ -5083,7 +5097,11 @@ function getShareBaseUrl(): URL {
 }
 
 function buildViewerShareUrl(): string | null {
-  return ViewerController.buildViewerShareUrl(viewerActiveVideoContext, getCurrentViewerTimeParts());
+  return ViewerController.buildViewerShareUrl(
+    viewerActiveVideoContext,
+    getCurrentViewerTimeParts(),
+    getViewerFrameRate()
+  );
 }
 
 async function copyViewerShareLink(copyButton: HTMLButtonElement | null): Promise<void> {
@@ -5327,6 +5345,9 @@ function mountImportedSourceVideoForCurrentImage(source: McvDataSource, attempt 
       }, 250);
     }
     return;
+  }
+  if (source.fps !== undefined && Number.isFinite(source.fps) && source.fps > 0) {
+    viewerManualFps = source.fps;
   }
   if (source.seconds !== undefined || source.frames !== undefined) {
     linkedVideo.initialSeekSeconds =

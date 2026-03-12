@@ -34,6 +34,7 @@ type LaunchSelectionIntent = {
   value: string;
   tRaw: string;
   fRaw: string;
+  fpsRaw: string;
 };
 
 type McvMediaApiSource = {
@@ -44,6 +45,7 @@ type McvMediaApiSource = {
   youtube_id?: string;
   seconds?: number;
   frames?: number;
+  fps?: number;
 };
 
 type McvUploadedVideoSource = {
@@ -51,6 +53,7 @@ type McvUploadedVideoSource = {
   filename: string;
   seconds: number;
   frames: number;
+  fps?: number;
 };
 
 type McvDataSource = McvMediaApiSource | McvUploadedVideoSource;
@@ -113,7 +116,8 @@ export function splitSecondsAndFrames(
 export function buildMcvSourceFromViewer(
   mediaLibrary: MediaLibrary,
   viewer: ViewerMedia,
-  frameBase: number
+  frameBase: number,
+  fps?: number
 ): McvDataSource | null {
   if (viewer.id === "raw-url" || viewer.id === "upload-file") {
     return null;
@@ -130,6 +134,9 @@ export function buildMcvSourceFromViewer(
       url: videoEntry.url,
       ...(videoEntry.youtube_id ? { youtube_id: videoEntry.youtube_id } : {}),
     };
+    if (Number.isFinite(fps) && (fps as number) > 0) {
+      source.fps = Number(fps);
+    }
     if (viewer.initialSeekSeconds !== undefined) {
       const { seconds, frames } = splitSecondsAndFrames(viewer.initialSeekSeconds, frameBase);
       source.seconds = seconds;
@@ -296,12 +303,13 @@ export function parseLaunchSelectionIntent(): LaunchSelectionIntent | null {
     const ytValue = (params.get("yt") || "").trim();
     const tRaw = (params.get("t") || "").trim();
     const fRaw = (params.get("f") || "").trim();
+    const fpsRaw = (params.get("fps") || "").trim();
 
     if (idValue) {
-      return { mode: "id", value: idValue, tRaw, fRaw };
+      return { mode: "id", value: idValue, tRaw, fRaw, fpsRaw };
     }
     if (ytValue) {
-      return { mode: "yt", value: ytValue, tRaw, fRaw };
+      return { mode: "yt", value: ytValue, tRaw, fRaw, fpsRaw };
     }
   }
 
@@ -310,28 +318,44 @@ export function parseLaunchSelectionIntent(): LaunchSelectionIntent | null {
 
 export function buildLaunchSeekInfo(
   intent: LaunchSelectionIntent,
-  frameBase: number,
+  defaultFrameBase: number,
   parseTimestampSeconds: (raw: string) => number | null,
   formatTimestamp: (seconds: number) => string
 ): {
   initialSeekSeconds?: number;
   timestampLabel?: string;
+  fps?: number;
 } {
+  let fps: number | undefined;
+  if (intent.fpsRaw.length > 0) {
+    const parsedFps = Number.parseFloat(intent.fpsRaw);
+    if (Number.isFinite(parsedFps) && parsedFps > 0) {
+      fps = parsedFps;
+    }
+  }
+  const frameBase = Math.max(
+    1,
+    Math.round(Number.isFinite(fps) && (fps as number) > 0 ? (fps as number) : defaultFrameBase)
+  );
   const hasT = intent.tRaw.length > 0;
   const hasF = intent.fRaw.length > 0;
   if (!hasT && !hasF) {
-    return {};
+    return fps !== undefined ? { fps } : {};
   }
 
   const parsedT = hasT ? parseTimestampSeconds(intent.tRaw) : 0;
   if (parsedT === null) {
-    return {};
+    return fps !== undefined ? { fps } : {};
   }
 
   let frame = 0;
   if (hasF) {
     if (!/^\d+$/.test(intent.fRaw)) {
-      return { initialSeekSeconds: Math.max(0, parsedT), timestampLabel: `${intent.tRaw || "0"}|0` };
+      return {
+        initialSeekSeconds: Math.max(0, parsedT),
+        timestampLabel: `${intent.tRaw || "0"}|0`,
+        ...(fps !== undefined ? { fps } : {}),
+      };
     }
     frame = Math.max(0, Number(intent.fRaw));
   }
@@ -340,7 +364,7 @@ export function buildLaunchSeekInfo(
   const displayFrame = frame % frameBase;
   const displaySeconds = Math.max(0, Math.floor(parsedT + Math.floor(frame / frameBase)));
   const timestampLabel = `${formatTimestamp(displaySeconds)}|${displayFrame}`;
-  return { initialSeekSeconds, timestampLabel };
+  return { initialSeekSeconds, timestampLabel, ...(fps !== undefined ? { fps } : {}) };
 }
 
 export function setTabButtonState(activeMediaTab: MediaTab): void {

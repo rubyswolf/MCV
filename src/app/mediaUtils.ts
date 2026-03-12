@@ -40,6 +40,7 @@ type McvMediaApiSource = {
   youtube_id?: string;
   seconds?: number;
   frames?: number;
+  fps?: number;
 };
 
 type McvUploadedVideoSource = {
@@ -47,6 +48,7 @@ type McvUploadedVideoSource = {
   filename: string;
   seconds: number;
   frames: number;
+  fps?: number;
 };
 
 type McvDataSource = McvMediaApiSource | McvUploadedVideoSource;
@@ -350,6 +352,7 @@ export function normalizeImportedSource(value: unknown): McvDataSource | undefin
       filename: item.filename,
       seconds,
       frames,
+      ...(typeof item.fps === "number" && Number.isFinite(item.fps) && item.fps > 0 ? { fps: Number(item.fps) } : {}),
     };
   }
   const type = item.type;
@@ -373,6 +376,9 @@ export function normalizeImportedSource(value: unknown): McvDataSource | undefin
   }
   if (type === "video" && typeof item.frames === "number" && Number.isFinite(item.frames) && item.frames >= 0) {
     source.frames = Math.floor(item.frames);
+  }
+  if (type === "video" && typeof item.fps === "number" && Number.isFinite(item.fps) && item.fps > 0) {
+    source.fps = Number(item.fps);
   }
   return source;
 }

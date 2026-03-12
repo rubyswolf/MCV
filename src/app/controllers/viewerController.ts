@@ -192,7 +192,8 @@ export function getShareBaseUrl(): URL {
 
 export function buildViewerShareUrl(
   context: ViewerMedia | null,
-  timeParts: { seconds: number; frame: number }
+  timeParts: { seconds: number; frame: number },
+  fps?: number
 ): string | null {
   if (!context) {
     return null;
@@ -214,6 +215,9 @@ export function buildViewerShareUrl(
   }
   shareUrl.searchParams.set("t", String(timeParts.seconds));
   shareUrl.searchParams.set("f", String(timeParts.frame));
+  if (Number.isFinite(fps) && (fps as number) > 0) {
+    shareUrl.searchParams.set("fps", String(fps));
+  }
   return shareUrl.toString();
 }
 
