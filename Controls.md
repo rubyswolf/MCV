@@ -20,6 +20,7 @@ MCV lets you:
    - `Videos` tab: choose a video from Media API.
    - `Images` tab: choose an image from Media API.
    - `Upload` tab: upload local image/video/SVG.
+   - Optional for videos: upload video + metadata JSON together (multi-select) for deterministic frame stepping.
 2. If video: set timestamp and click `Analyze!` to extract the current frame.
 3. Annotate in draw mode (`1/2/3` or `Q/W/E`).
 4. Add anchors in anchor mode (`A`) and enter world coordinates.
@@ -46,6 +47,7 @@ Video panel includes:
 
 - Native video controls.
 - `HH:MM:SS|F` input (frame suffix `|F`, 0-indexed frame).
+- FPS input.
 - `Copy link` button.
 - `Open in YT` button (when `youtube_id` is available).
 - `Analyze!` button (extract current frame).
@@ -60,17 +62,28 @@ Time input parsing supports:
 
 Keyboard while video is active and no text field is focused:
 
-- `,` = previous frame (`-1 frame`, based on detected video FPS)
-- `.` = next frame (`+1 frame`, based on detected video FPS)
+- `,` = previous frame (`-1 frame`)
+- `.` = next frame (`+1 frame`)
 - `Left Arrow` = `-5s`
 - `Right Arrow` = `+5s`
 - `J` = `-10s`
 - `L` = `+10s`
 
-Frame-base note:
+Frame-base and stepping note:
 
-- `|F` is also interpreted with the detected video frame base (for example, 60 FPS uses `0..59`).
-- If FPS cannot be inferred yet, the tool temporarily falls back to 30 FPS.
+- `|F` is interpreted with the current FPS input frame base (for example, 60 FPS uses `0..59`).
+- Without metadata JSON, stepping uses browser-side decode-confirmed fallback (requestVideoFrameCallback-assisted), which is more stable than naive `currentTime += 1/fps` but still browser-dependent.
+- With metadata JSON loaded, `,` and `.` step by metadata frame index and seek to exact per-frame timestamps.
+
+Video metadata JSON workflow:
+
+- Generate metadata with:
+  - `python generate_video_metadata.py <video_path> --ffprobe <ffprobe_path>`
+  - Example: `python generate_video_metadata.py "C:\Users\Dart\Videos\clipper\mcc11.webm" --ffprobe "C:\apps\ffmpeg\bin\ffprobe.exe"`
+- This writes `<video_filename>.metadata.json` next to the video by default.
+- In `Upload` tab, select both the video and the metadata JSON in one selection (or drag-drop both together).
+- MCV auto-matches metadata to the video (filename stem match preferred).
+- If metadata parse fails, MCV continues in fallback stepping mode and shows an error.
 
 Unsaved-change protection:
 

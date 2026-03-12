@@ -301,6 +301,12 @@ type SearchIntent = {
 
 type MediaKind = "video" | "image";
 
+type VideoFrameMetadata = {
+  frameTimestampsSeconds: number[];
+  fps?: number;
+  sourceFile?: string;
+};
+
 type ViewerMedia = {
   tab: MediaTab;
   id: string;
@@ -311,6 +317,7 @@ type ViewerMedia = {
   timestampLabel?: string;
   initialSeekSeconds?: number;
   isObjectUrl?: boolean;
+  frameMetadata?: VideoFrameMetadata;
 };
 
 type LaunchSelectionIntent = {
@@ -351,6 +358,8 @@ let viewerFpsInput: HTMLInputElement | null = null;
 let viewerEditingField: "hms" | null = null;
 let viewerActiveVideoContext: ViewerMedia | null = null;
 let viewerManualFps = 60;
+let viewerFrameMetadata: VideoFrameMetadata | null = null;
+let viewerFrameStepToken = 0;
 let viewerImageRenderToken = 0;
 let pendingImportedMcvState:
   | {
@@ -4966,8 +4975,159 @@ async function saveCurrentStateAsSvg(): Promise<void> {
   clearAnnotationsDirty();
 }
 
-async function handleUploadedFile(file: File): Promise<void> {
-  selectedUploadFilename = file.name;
+function getFileStem(name: string): string {
+  const lower = name.toLowerCase().trim();
+  const stem = lower.replace(/\.[^.]+$/, "");
+  return stem.replace(/(?:[._-](?:mcvmeta|metadata))$/, "");
+}
+
+function isLikelyJsonFile(file: File): boolean {
+  return file.name.toLowerCase().endsWith(".json") || file.type === "application/json";
+}
+
+function isLikelyVideoFile(file: File): boolean {
+  if (file.type.startsWith("video/")) {
+    return true;
+  }
+  return MediaUtils.inferMediaKindFromFile(file) === "video";
+}
+
+function parseRationalFps(value: unknown): number | undefined {
+  if (typeof value === "number" && Number.isFinite(value) && value > 0) {
+    return value;
+  }
+  if (typeof value !== "string") {
+    return undefined;
+  }
+  const trimmed = value.trim();
+  if (!trimmed) {
+    return undefined;
+  }
+  if (/^\d+(\.\d+)?$/.test(trimmed)) {
+    const parsed = Number.parseFloat(trimmed);
+    return Number.isFinite(parsed) && parsed > 0 ? parsed : undefined;
+  }
+  const match = trimmed.match(/^(\d+(?:\.\d+)?)\s*\/\s*(\d+(?:\.\d+)?)$/);
+  if (!match) {
+    return undefined;
+  }
+  const numerator = Number.parseFloat(match[1]);
+  const denominator = Number.parseFloat(match[2]);
+  if (!Number.isFinite(numerator) || !Number.isFinite(denominator) || denominator <= 0) {
+    return undefined;
+  }
+  const fps = numerator / denominator;
+  return Number.isFinite(fps) && fps > 0 ? fps : undefined;
+}
+
+function normalizeVideoFrameMetadataPayload(payload: unknown, sourceFile: string): VideoFrameMetadata | null {
+  if (!payload || typeof payload !== "object" || Array.isArray(payload)) {
+    return null;
+  }
+  const record = payload as Record<string, unknown>;
+  const rawTimestamps =
+    record.frame_timestamps_seconds ??
+    record.frame_timestamps ??
+    record.timestamps_seconds ??
+    record.timestamps;
+  if (!Array.isArray(rawTimestamps)) {
+    return null;
+  }
+  const frameTimestampsSeconds = rawTimestamps
+    .map((value) => (typeof value === "number" ? value : Number.NaN))
+    .filter((value) => Number.isFinite(value) && value >= 0);
+  if (frameTimestampsSeconds.length < 2) {
+    return null;
+  }
+  for (let i = 1; i < frameTimestampsSeconds.length; i += 1) {
+    if (frameTimestampsSeconds[i] < frameTimestampsSeconds[i - 1]) {
+      return null;
+    }
+  }
+  const fps =
+    parseRationalFps(record.fps) ??
+    parseRationalFps(record.fps_nominal) ??
+    parseRationalFps(record.avg_frame_rate);
+  return {
+    frameTimestampsSeconds,
+    ...(fps !== undefined ? { fps } : {}),
+    sourceFile,
+  };
+}
+
+async function tryLoadVideoMetadataFile(file: File): Promise<VideoFrameMetadata | null> {
+  try {
+    const text = await MediaUtils.readFileAsText(file);
+    const payload = JSON.parse(text);
+    return normalizeVideoFrameMetadataPayload(payload, file.name);
+  } catch {
+    return null;
+  }
+}
+
+function chooseMetadataFileForVideo(videoFile: File, metadataFiles: File[]): File | null {
+  if (metadataFiles.length === 0) {
+    return null;
+  }
+  const targetStem = getFileStem(videoFile.name);
+  const exact = metadataFiles.find((file) => getFileStem(file.name) === targetStem);
+  if (exact) {
+    return exact;
+  }
+  if (metadataFiles.length === 1) {
+    return metadataFiles[0];
+  }
+  const loose = metadataFiles.find((file) => getFileStem(file.name).includes(targetStem) || targetStem.includes(getFileStem(file.name)));
+  return loose ?? metadataFiles[0];
+}
+
+async function handleUploadedFiles(filesLike: FileList | File[]): Promise<void> {
+  const files = Array.from(filesLike).filter((file) => !!file);
+  if (files.length === 0) {
+    return;
+  }
+  selectedUploadFilename =
+    files.length === 1
+      ? files[0].name
+      : `${files[0].name} (+${files.length - 1} more)`;
+  if (files.length === 1) {
+    if (isLikelyJsonFile(files[0])) {
+      setMediaError("Metadata JSON must be uploaded together with its video file.");
+      renderMediaBox();
+      return;
+    }
+    await handleUploadedFile(files[0]);
+    return;
+  }
+
+  const videoFiles = files.filter((file) => isLikelyVideoFile(file));
+  const metadataFiles = files.filter((file) => isLikelyJsonFile(file));
+  if (videoFiles.length === 0) {
+    await handleUploadedFile(files[0]);
+    return;
+  }
+
+  const videoFile = videoFiles[0];
+  const selectedMetadataFile = chooseMetadataFileForVideo(videoFile, metadataFiles);
+  let frameMetadata: VideoFrameMetadata | null = null;
+  if (selectedMetadataFile) {
+    frameMetadata = await tryLoadVideoMetadataFile(selectedMetadataFile);
+    if (!frameMetadata) {
+      setMediaError(`Could not parse frame metadata JSON: ${selectedMetadataFile.name}. Continuing without it.`);
+    } else {
+      clearMediaError();
+    }
+  }
+  await handleUploadedFile(videoFile, frameMetadata, selectedUploadFilename);
+}
+
+async function handleUploadedFile(
+  file: File,
+  frameMetadata: VideoFrameMetadata | null = null,
+  selectedLabel?: string
+): Promise<void> {
+  clearMediaError();
+  selectedUploadFilename = selectedLabel ?? file.name;
   pendingImportedMcvState = null;
   pendingImportedVideoSourceForImageLoad = null;
   if (MediaUtils.isSvgFile(file)) {
@@ -5003,11 +5163,59 @@ async function handleUploadedFile(file: File): Promise<void> {
     title: file.name,
     url: objectUrl,
     isObjectUrl: true,
+    ...(frameMetadata ? { frameMetadata } : {}),
   });
 }
 
 function clampVideoTime(video: HTMLVideoElement, seconds: number): number {
   return ViewerController.clampVideoTime(video, seconds);
+}
+
+function findNearestFrameTimestampIndex(frameTimestampsSeconds: number[], timeSeconds: number): number {
+  if (frameTimestampsSeconds.length === 0) {
+    return 0;
+  }
+  let lo = 0;
+  let hi = frameTimestampsSeconds.length - 1;
+  while (lo < hi) {
+    const mid = Math.floor((lo + hi) * 0.5);
+    if (frameTimestampsSeconds[mid] < timeSeconds) {
+      lo = mid + 1;
+    } else {
+      hi = mid;
+    }
+  }
+  if (lo <= 0) {
+    return 0;
+  }
+  if (lo >= frameTimestampsSeconds.length) {
+    return frameTimestampsSeconds.length - 1;
+  }
+  const prev = lo - 1;
+  const prevDelta = Math.abs(frameTimestampsSeconds[prev] - timeSeconds);
+  const nextDelta = Math.abs(frameTimestampsSeconds[lo] - timeSeconds);
+  return nextDelta < prevDelta ? lo : prev;
+}
+
+function getCurrentMetadataFrameIndex(): number | null {
+  if (!viewerVideoNode || !viewerFrameMetadata || viewerFrameMetadata.frameTimestampsSeconds.length === 0) {
+    return null;
+  }
+  const current = Number.isFinite(viewerVideoNode.currentTime) ? viewerVideoNode.currentTime : 0;
+  const safe = Math.max(0, current);
+  return findNearestFrameTimestampIndex(viewerFrameMetadata.frameTimestampsSeconds, safe);
+}
+
+function getCurrentViewerTimePartsFromMetadata(): { seconds: number; frame: number } | null {
+  const index = getCurrentMetadataFrameIndex();
+  if (index === null) {
+    return null;
+  }
+  const frameBase = getViewerFrameBase();
+  return {
+    seconds: Math.floor(index / frameBase),
+    frame: index % frameBase,
+  };
 }
 
 function syncViewerTimeInputs(force = false): void {
@@ -5017,13 +5225,8 @@ function syncViewerTimeInputs(force = false): void {
   if (!force && viewerEditingField) {
     return;
   }
-  const current = Number.isFinite(viewerVideoNode.currentTime) ? viewerVideoNode.currentTime : 0;
-  const safe = Math.max(0, current);
-  const wholeSeconds = Math.floor(safe);
-  const fractional = safe - wholeSeconds;
-  const frameBase = getViewerFrameBase();
-  const frame = Math.min(frameBase - 1, Math.floor(fractional * frameBase));
-  viewerHmsInput.value = `${MediaUtils.formatTimestamp(wholeSeconds)}|${frame}`;
+  const { seconds, frame } = getCurrentViewerTimeParts();
+  viewerHmsInput.value = `${MediaUtils.formatTimestamp(seconds)}|${frame}`;
 }
 
 function parseFrameSuffix(raw: string): { base: string; frame: number } | null {
@@ -5046,10 +5249,20 @@ function seekViewerFromInput(): void {
   const frameBase = getViewerFrameBase();
   const normalizedFrame = Math.min(parsedWithFrame.frame, frameBase - 1);
   const targetSeconds = Math.max(0, baseSeconds) + normalizedFrame / frameBase;
+  if (viewerFrameMetadata && viewerFrameMetadata.frameTimestampsSeconds.length > 0) {
+    const targetIndex = findNearestFrameTimestampIndex(viewerFrameMetadata.frameTimestampsSeconds, targetSeconds);
+    const mappedSeconds = viewerFrameMetadata.frameTimestampsSeconds[targetIndex];
+    viewerVideoNode.currentTime = clampVideoTime(viewerVideoNode, mappedSeconds);
+    return;
+  }
   viewerVideoNode.currentTime = clampVideoTime(viewerVideoNode, targetSeconds);
 }
 
 function getCurrentViewerTimeParts(): { seconds: number; frame: number } {
+  const metadataParts = getCurrentViewerTimePartsFromMetadata();
+  if (metadataParts) {
+    return metadataParts;
+  }
   return ViewerController.getCurrentViewerTimeParts(
     viewerVideoNode,
     viewerActiveVideoContext,
@@ -5153,6 +5366,11 @@ function renderVideoViewerUi(
     sourceLabel?: string;
   }
 ): void {
+  if (videoContext.frameMetadata?.fps !== undefined && Number.isFinite(videoContext.frameMetadata.fps) && videoContext.frameMetadata.fps > 0) {
+    viewerManualFps = videoContext.frameMetadata.fps;
+  }
+  viewerFrameMetadata = videoContext.frameMetadata ?? null;
+  viewerFrameStepToken += 1;
   if (options?.containerRole) {
     const existing = contentNode.querySelector(`[data-role="${options.containerRole}"]`);
     if (existing) {
@@ -5446,6 +5664,8 @@ function closeViewer(): void {
   viewerFpsInput = null;
   viewerEditingField = null;
   viewerActiveVideoContext = null;
+  viewerFrameMetadata = null;
+  viewerFrameStepToken += 1;
   activeAnalyzeButton = null;
   pendingImportedVideoSourceForImageLoad = null;
   clearViewerFullImage();
@@ -5478,6 +5698,8 @@ function renderViewerScreen(): void {
   viewerFpsInput = null;
   viewerEditingField = null;
   viewerActiveVideoContext = null;
+  viewerFrameMetadata = null;
+  viewerFrameStepToken += 1;
   refreshUnsavedActionUi();
 
   if (viewerMedia.kind === "image") {
@@ -5604,8 +5826,8 @@ function createUploadZoneNode(): HTMLDivElement {
   const textNode = document.createElement("div");
   textNode.className = "upload-copy";
   textNode.textContent = selectedUploadFilename
-    ? `Selected file: ${selectedUploadFilename}`
-    : "Drag and drop a file here or click to select";
+    ? `Selected upload: ${selectedUploadFilename}`
+    : "Drag and drop file(s) here (video + metadata JSON supported) or click to select";
   zoneNode.appendChild(textNode);
 
   const fileInput = document.getElementById("upload-file-input") as HTMLInputElement | null;
@@ -5630,8 +5852,7 @@ function createUploadZoneNode(): HTMLDivElement {
     zoneNode.classList.remove("dragover");
     const droppedFiles = event.dataTransfer?.files;
     if (droppedFiles && droppedFiles.length > 0) {
-      const file = droppedFiles[0];
-      void handleUploadedFile(file);
+      void handleUploadedFiles(droppedFiles);
     }
   });
 
@@ -5687,6 +5908,109 @@ function restoreFullUncroppedImageView(): void {
   resetViewerMotionState();
   renderCropResultFromCache();
   clearMediaError();
+}
+
+function waitForSeekSettled(video: HTMLVideoElement, timeoutMs = 220): Promise<void> {
+  return new Promise((resolve) => {
+    let done = false;
+    const finish = () => {
+      if (done) {
+        return;
+      }
+      done = true;
+      video.removeEventListener("seeked", onSeeked);
+      window.clearTimeout(timeoutId);
+      resolve();
+    };
+    const onSeeked = () => finish();
+    const timeoutId = window.setTimeout(finish, timeoutMs);
+    if (video.seeking) {
+      video.addEventListener("seeked", onSeeked, { once: true });
+    } else {
+      window.setTimeout(finish, 0);
+    }
+  });
+}
+
+function waitForPresentedVideoFrame(video: HTMLVideoElement, timeoutMs = 220): Promise<void> {
+  type VideoWithFrameCallback = HTMLVideoElement & {
+    requestVideoFrameCallback?: (
+      callback: (now: number, metadata: { mediaTime?: number; presentedFrames?: number }) => void
+    ) => number;
+    cancelVideoFrameCallback?: (handle: number) => void;
+  };
+  const videoWithCallback = video as VideoWithFrameCallback;
+  if (typeof videoWithCallback.requestVideoFrameCallback !== "function") {
+    return new Promise((resolve) => window.setTimeout(resolve, 0));
+  }
+  return new Promise((resolve) => {
+    let done = false;
+    let handle: number | null = null;
+    const finish = () => {
+      if (done) {
+        return;
+      }
+      done = true;
+      if (handle !== null && typeof videoWithCallback.cancelVideoFrameCallback === "function") {
+        try {
+          videoWithCallback.cancelVideoFrameCallback(handle);
+        } catch {
+          // Ignore cancel callback errors.
+        }
+      }
+      window.clearTimeout(timeoutId);
+      resolve();
+    };
+    const timeoutId = window.setTimeout(finish, timeoutMs);
+    handle = videoWithCallback.requestVideoFrameCallback!(() => {
+      finish();
+    });
+  });
+}
+
+async function stepViewerBySingleFrame(direction: -1 | 1): Promise<void> {
+  if (!viewerVideoNode || !viewerActiveVideoContext || viewerActiveVideoContext.kind !== "video") {
+    return;
+  }
+  const video = viewerVideoNode;
+  const metadataTimestamps = viewerFrameMetadata?.frameTimestampsSeconds ?? [];
+  if (metadataTimestamps.length > 0) {
+    const currentIndex = getCurrentMetadataFrameIndex() ?? 0;
+    const targetIndex = Math.max(0, Math.min(metadataTimestamps.length - 1, currentIndex + direction));
+    video.currentTime = clampVideoTime(video, metadataTimestamps[targetIndex]);
+    await waitForSeekSettled(video);
+    await waitForPresentedVideoFrame(video);
+    syncViewerTimeInputs(true);
+    return;
+  }
+
+  const token = ++viewerFrameStepToken;
+  const frameBase = getViewerFrameBase();
+  const getLinearIndex = (parts: { seconds: number; frame: number }) => parts.seconds * frameBase + parts.frame;
+  const startIndex = getLinearIndex(getCurrentViewerTimeParts());
+  const baseTime = Number.isFinite(video.currentTime) ? video.currentTime : 0;
+  const stepSeconds = getViewerFrameDurationSeconds();
+
+  for (let attempt = 1; attempt <= 8; attempt += 1) {
+    if (token !== viewerFrameStepToken) {
+      return;
+    }
+    const targetTime = clampVideoTime(video, baseTime + direction * stepSeconds * attempt);
+    video.currentTime = targetTime;
+    await waitForSeekSettled(video);
+    if (token !== viewerFrameStepToken) {
+      return;
+    }
+    await waitForPresentedVideoFrame(video);
+    if (token !== viewerFrameStepToken) {
+      return;
+    }
+    const nextIndex = getLinearIndex(getCurrentViewerTimeParts());
+    if ((direction > 0 && nextIndex > startIndex) || (direction < 0 && nextIndex < startIndex)) {
+      break;
+    }
+  }
+  syncViewerTimeInputs(true);
 }
 
 function handleViewerKeybind(event: KeyboardEvent): void {
@@ -6006,12 +6330,19 @@ function handleViewerKeybind(event: KeyboardEvent): void {
     return;
   }
 
-  let deltaSeconds = 0;
   if (event.key === ",") {
-    deltaSeconds = -getViewerFrameDurationSeconds();
-  } else if (event.key === ".") {
-    deltaSeconds = getViewerFrameDurationSeconds();
-  } else if (event.key === "ArrowLeft") {
+    event.preventDefault();
+    void stepViewerBySingleFrame(-1);
+    return;
+  }
+  if (event.key === ".") {
+    event.preventDefault();
+    void stepViewerBySingleFrame(1);
+    return;
+  }
+
+  let deltaSeconds = 0;
+  if (event.key === "ArrowLeft") {
     deltaSeconds = -5;
   } else if (event.key === "ArrowRight") {
     deltaSeconds = 5;
@@ -6026,6 +6357,7 @@ function handleViewerKeybind(event: KeyboardEvent): void {
   event.preventDefault();
   const current = Number.isFinite(viewerVideoNode.currentTime) ? viewerVideoNode.currentTime : 0;
   viewerVideoNode.currentTime = clampVideoTime(viewerVideoNode, current + deltaSeconds);
+  viewerFrameStepToken += 1;
   syncViewerTimeInputs(true);
 }
 
@@ -6255,8 +6587,7 @@ function installUiHandlers(): void {
   if (fileInput) {
     fileInput.addEventListener("change", () => {
       if (fileInput.files && fileInput.files.length > 0) {
-        const file = fileInput.files[0];
-        void handleUploadedFile(file);
+        void handleUploadedFiles(fileInput.files);
         fileInput.value = "";
       }
     });
