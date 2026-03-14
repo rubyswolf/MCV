@@ -578,6 +578,20 @@ function clearOpopLine(index: number): void {
 }
 
 function syncStructureEndpointRefs(): void {
+  // Keep anchor line refs canonical with their linked vertex.
+  MCV_DATA.structure.anchors.forEach((anchor, anchorIndex) => {
+    const vertex = MCV_DATA.structure.vertices[anchor.vertex];
+    if (vertex) {
+      const canonicalFrom = Geometry.normalizeLineRefs(vertex.from);
+      const canonicalTo = Geometry.normalizeLineRefs(vertex.to);
+      anchor.from = canonicalFrom;
+      anchor.to = canonicalTo;
+      vertex.anchor = anchorIndex;
+    } else {
+      anchor.from = Geometry.normalizeLineRefs(anchor.from);
+      anchor.to = Geometry.normalizeLineRefs(anchor.to);
+    }
+  });
   MCV_DATA.structure.lines.forEach((line) => {
     delete line.from.anchor;
     delete line.to.anchor;

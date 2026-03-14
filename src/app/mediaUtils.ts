@@ -524,6 +524,12 @@ export function normalizeImportedMcvData(value: unknown): {
     } else {
       const vertex = vertices[vertexIndex];
       vertex.anchor = anchorIndex;
+      const mergedFrom = normalizeLineRefs(vertex.from.length > 0 ? vertex.from : anchor.from);
+      const mergedTo = normalizeLineRefs(vertex.to.length > 0 ? vertex.to : anchor.to);
+      vertex.from = mergedFrom;
+      vertex.to = mergedTo;
+      anchor.from = mergedFrom;
+      anchor.to = mergedTo;
       if (anchor.x !== undefined) {
         vertex.x = anchor.x;
       }
