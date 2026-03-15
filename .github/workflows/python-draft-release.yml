@@ -1,0 +1,46 @@
+name: Build Python Standalone Draft Release
+
+on:
+  push:
+    branches:
+      - "**"
+
+permissions:
+  contents: write
+
+jobs:
+  build-python-and-draft-release:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build python target
+        run: npm run build:python
+
+      - name: Verify python standalone output
+        run: test -f dist/python/mcv_standalone.py
+
+      - name: Create draft release with python standalone
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ci-${{ github.sha }}
+          name: Python Standalone (draft) - ${{ github.ref_name }} @ ${{ github.sha }}
+          draft: true
+          prerelease: true
+          files: |
+            dist/python/mcv_standalone.py
+          body: |
+            Automated draft release generated from a push build.
+            Branch: `${{ github.ref_name }}`
+            Commit: `${{ github.sha }}`
