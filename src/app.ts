@@ -365,8 +365,7 @@ let pendingImportedMcvState:
   | {
       annotations: ManualAnnotation[];
       opop: Array<ManualAnnotation | null>;
-      anchors: StructureAnchor[];
-      vertices: StructureVertexData[];
+      structure: StructureData;
       source?: McvDataSource;
     }
   | null = null;
@@ -577,21 +576,46 @@ function clearOpopLine(index: number): void {
   MCV_DATA.opop[index] = null;
 }
 
-function syncStructureEndpointRefs(): void {
-  // Keep anchor line refs canonical with their linked vertex.
+function syncAnchorVerticesFromAnchors(): void {
+  const anchorCount = MCV_DATA.structure.anchors.length;
+  while (MCV_DATA.structure.vertices.length < anchorCount) {
+    MCV_DATA.structure.vertices.push({
+      from: [],
+      to: [],
+    });
+  }
   MCV_DATA.structure.anchors.forEach((anchor, anchorIndex) => {
-    const vertex = MCV_DATA.structure.vertices[anchor.vertex];
-    if (vertex) {
-      const canonicalFrom = Geometry.normalizeLineRefs(vertex.from);
-      const canonicalTo = Geometry.normalizeLineRefs(vertex.to);
-      anchor.from = canonicalFrom;
-      anchor.to = canonicalTo;
-      vertex.anchor = anchorIndex;
+    anchor.from = Geometry.normalizeLineRefs(anchor.from);
+    anchor.to = Geometry.normalizeLineRefs(anchor.to);
+    anchor.vertex = anchorIndex;
+    const vertex = MCV_DATA.structure.vertices[anchorIndex];
+    vertex.from = anchor.from.slice();
+    vertex.to = anchor.to.slice();
+    vertex.anchor = anchorIndex;
+    if (anchor.x !== undefined) {
+      vertex.x = anchor.x;
     } else {
-      anchor.from = Geometry.normalizeLineRefs(anchor.from);
-      anchor.to = Geometry.normalizeLineRefs(anchor.to);
+      delete vertex.x;
+    }
+    if (anchor.y !== undefined) {
+      vertex.y = anchor.y;
+    } else {
+      delete vertex.y;
+    }
+    if (anchor.z !== undefined) {
+      vertex.z = anchor.z;
+    } else {
+      delete vertex.z;
     }
   });
+  for (let index = anchorCount; index < MCV_DATA.structure.vertices.length; index += 1) {
+    delete MCV_DATA.structure.vertices[index].anchor;
+  }
+}
+
+function syncStructureEndpointRefs(): void {
+  // Anchors are canonical. Their paired vertices mirror anchors exactly.
+  syncAnchorVerticesFromAnchors();
   MCV_DATA.structure.lines.forEach((line) => {
     delete line.from.anchor;
     delete line.to.anchor;
@@ -630,7 +654,6 @@ function syncStructureEndpointRefs(): void {
 
 function rebuildAnchorsAndVerticesAfterLineRemoval(removedLineIndex: number): void {
   const oldAnchors = MCV_DATA.structure.anchors;
-  const oldVertices = MCV_DATA.structure.vertices;
 
   const keptAnchors = oldAnchors
     .map((anchor, oldAnchorIndex) => {
@@ -650,75 +673,40 @@ function rebuildAnchorsAndVerticesAfterLineRemoval(removedLineIndex: number): vo
     })
     .filter((value): value is { oldAnchorIndex: number; anchor: StructureAnchor } => !!value);
 
-  const remappedVertices = oldVertices.map((vertex) => ({
-    ...vertex,
-    from: Geometry.remapLineRefsAfterLineRemoval(vertex.from, removedLineIndex),
-    to: Geometry.remapLineRefsAfterLineRemoval(vertex.to, removedLineIndex),
-  }));
-
-  const newVertices: StructureVertexData[] = [];
-  const usedOldVertexIndexes = new Set<number>();
-
-  keptAnchors.forEach((entry, newAnchorIndex) => {
-    const oldVertexIndex = entry.anchor.vertex;
-    const oldVertex =
-      oldVertexIndex >= 0 && oldVertexIndex < remappedVertices.length
-        ? remappedVertices[oldVertexIndex]
-        : undefined;
-    if (oldVertex !== undefined) {
-      usedOldVertexIndexes.add(oldVertexIndex);
-    }
-    const vertexFrom = oldVertex ? oldVertex.from : entry.anchor.from;
-    const vertexTo = oldVertex ? oldVertex.to : entry.anchor.to;
-    const nextVertex: StructureVertexData = {
-      from: Geometry.normalizeLineRefs(vertexFrom.length > 0 ? vertexFrom : entry.anchor.from),
-      to: Geometry.normalizeLineRefs(vertexTo.length > 0 ? vertexTo : entry.anchor.to),
-      ...(oldVertex?.x !== undefined ? { x: oldVertex.x } : {}),
-      ...(oldVertex?.y !== undefined ? { y: oldVertex.y } : {}),
-      ...(oldVertex?.z !== undefined ? { z: oldVertex.z } : {}),
-      anchor: newAnchorIndex,
-    };
-    newVertices.push(nextVertex);
-    entry.anchor.vertex = newVertices.length - 1;
-  });
-
-  remappedVertices.forEach((vertex, oldVertexIndex) => {
-    if (usedOldVertexIndexes.has(oldVertexIndex)) {
-      return;
-    }
-    if (vertex.anchor !== undefined) {
-      return;
-    }
-    newVertices.push({
-      ...vertex,
-      from: Geometry.normalizeLineRefs(vertex.from),
-      to: Geometry.normalizeLineRefs(vertex.to),
-    });
-  });
-
-  MCV_DATA.structure.anchors = keptAnchors.map((entry) => ({
+  MCV_DATA.structure.anchors = keptAnchors.map((entry, anchorIndex) => ({
     ...entry.anchor,
     from: Geometry.normalizeLineRefs(entry.anchor.from),
     to: Geometry.normalizeLineRefs(entry.anchor.to),
+    vertex: anchorIndex,
   }));
-  MCV_DATA.structure.vertices = newVertices;
+  // Removing a line invalidates solve-generated vertices. Keep only anchor-paired vertices.
+  MCV_DATA.structure.vertices = MCV_DATA.structure.anchors.map((anchor, anchorIndex) => ({
+    from: anchor.from.slice(),
+    to: anchor.to.slice(),
+    ...(anchor.x !== undefined ? { x: anchor.x } : {}),
+    ...(anchor.y !== undefined ? { y: anchor.y } : {}),
+    ...(anchor.z !== undefined ? { z: anchor.z } : {}),
+    anchor: anchorIndex,
+  }));
 }
 
 function createAnchorWithVertex(from: number[], to: number[]): number {
   const normalizedFrom = Geometry.normalizeLineRefs(from);
   const normalizedTo = Geometry.normalizeLineRefs(to);
-  const vertexIndex = MCV_DATA.structure.vertices.length;
   const anchorIndex = MCV_DATA.structure.anchors.length;
-  MCV_DATA.structure.vertices.push({
-    from: normalizedFrom,
-    to: normalizedTo,
-    anchor: anchorIndex,
-  });
   MCV_DATA.structure.anchors.push({
     from: normalizedFrom,
     to: normalizedTo,
-    vertex: vertexIndex,
+    vertex: anchorIndex,
   });
+  // Anchor-paired vertices occupy the first N slots where N = anchor count.
+  // Insert at anchor index so generated vertices remain as a trailing block.
+  MCV_DATA.structure.vertices.splice(anchorIndex, 0, {
+    from: normalizedFrom.slice(),
+    to: normalizedTo.slice(),
+    anchor: anchorIndex,
+  });
+  syncAnchorVerticesFromAnchors();
   return anchorIndex;
 }
 
@@ -1755,6 +1743,7 @@ function updateViewerCursor(): void {
 }
 
 function engageViewerGrab(pointerId: number): void {
+  blurFocusedEditableElement();
   viewerInput.grabbed = true;
   viewerInput.pointerId = pointerId;
   viewerInput.x = manualDragClientX;
@@ -2812,29 +2801,12 @@ function buildReprojectExtensionRenderSegments(
 }
 
 function purgeGeneratedVerticesKeepingAnchors(): void {
-  const retainedVertices: StructureVertexData[] = [];
-  MCV_DATA.structure.anchors.forEach((anchor, anchorIndex) => {
-    const vertex = MCV_DATA.structure.vertices[anchor.vertex];
-    if (vertex) {
-      retainedVertices.push({
-        ...vertex,
-        from: Geometry.normalizeLineRefs(vertex.from),
-        to: Geometry.normalizeLineRefs(vertex.to),
-        anchor: anchorIndex,
-      });
-    } else {
-      retainedVertices.push({
-        from: Geometry.normalizeLineRefs(anchor.from),
-        to: Geometry.normalizeLineRefs(anchor.to),
-        ...(anchor.x !== undefined ? { x: anchor.x } : {}),
-        ...(anchor.y !== undefined ? { y: anchor.y } : {}),
-        ...(anchor.z !== undefined ? { z: anchor.z } : {}),
-        anchor: anchorIndex,
-      });
-    }
-    anchor.vertex = retainedVertices.length - 1;
-  });
-  MCV_DATA.structure.vertices = retainedVertices;
+  syncAnchorVerticesFromAnchors();
+  const anchorCount = MCV_DATA.structure.anchors.length;
+  const generatedCount = Math.max(0, MCV_DATA.structure.vertices.length - anchorCount);
+  if (generatedCount > 0) {
+    MCV_DATA.structure.vertices.splice(-generatedCount, generatedCount);
+  }
   syncStructureEndpointRefs();
 }
 
@@ -2927,6 +2899,8 @@ function inferNeighborCoord(
 }
 
 function runVertexSolveAndBuildData(): VertexSolveRenderData {
+  // Solve always starts from canonical anchors + their mirrored vertices.
+  purgeGeneratedVerticesKeepingAnchors();
   const topologyVertices = collectStructureVertices();
   const endpointToVertex = new Map<number, number>();
   topologyVertices.forEach((vertex, vertexIndex) => {
@@ -3034,38 +3008,13 @@ function runVertexSolveAndBuildData(): VertexSolveRenderData {
     }
   }
 
-  const newVertices: StructureVertexData[] = [];
   MCV_DATA.structure.anchors.forEach((anchor, anchorIndex) => {
     const topoIndex = anchorToTopologyIndex[anchorIndex];
-    const topo = topoIndex >= 0 ? topologyVertices[topoIndex] : null;
-    const coord = topoIndex >= 0 ? coords[topoIndex] : {};
-    const nextVertex: StructureVertexData = {
-      from: Geometry.normalizeLineRefs(topo ? topo.endpointIds.filter((id) => id % 2 === 0).map((id) => Math.floor(id / 2)) : anchor.from),
-      to: Geometry.normalizeLineRefs(topo ? topo.endpointIds.filter((id) => id % 2 === 1).map((id) => Math.floor(id / 2)) : anchor.to),
-      anchor: anchorIndex,
-      ...(coord.x !== undefined ? { x: coord.x } : anchor.x !== undefined ? { x: anchor.x } : {}),
-      ...(coord.y !== undefined ? { y: coord.y } : anchor.y !== undefined ? { y: anchor.y } : {}),
-      ...(coord.z !== undefined ? { z: coord.z } : anchor.z !== undefined ? { z: anchor.z } : {}),
-    };
-    newVertices.push(nextVertex);
-    anchor.vertex = newVertices.length - 1;
-    if (nextVertex.x !== undefined) {
-      anchor.x = nextVertex.x;
-    } else {
-      delete anchor.x;
-    }
-    if (nextVertex.y !== undefined) {
-      anchor.y = nextVertex.y;
-    } else {
-      delete anchor.y;
-    }
-    if (nextVertex.z !== undefined) {
-      anchor.z = nextVertex.z;
-    } else {
-      delete anchor.z;
-    }
+    // Anchor/anchor-vertex atoms are immutable from solve pass; solve may only append new vertices.
+    anchor.vertex = anchorIndex;
   });
 
+  const appendedVertices: StructureVertexData[] = [];
   topologyVertices.forEach((topo, topoIndex) => {
     if (!generatedVertexIndexes.has(topoIndex)) {
       return;
@@ -3074,7 +3023,7 @@ function runVertexSolveAndBuildData(): VertexSolveRenderData {
       return;
     }
     const coord = coords[topoIndex];
-    newVertices.push({
+    appendedVertices.push({
       from: Geometry.normalizeLineRefs(topo.endpointIds.filter((id) => id % 2 === 0).map((id) => Math.floor(id / 2))),
       to: Geometry.normalizeLineRefs(topo.endpointIds.filter((id) => id % 2 === 1).map((id) => Math.floor(id / 2))),
       ...(coord.x !== undefined ? { x: coord.x } : {}),
@@ -3083,7 +3032,9 @@ function runVertexSolveAndBuildData(): VertexSolveRenderData {
     });
   });
 
-  MCV_DATA.structure.vertices = newVertices;
+  if (appendedVertices.length > 0) {
+    MCV_DATA.structure.vertices.push(...appendedVertices);
+  }
   syncStructureEndpointRefs();
 
   return {
@@ -3295,21 +3246,11 @@ function removeAnchorAtIndex(anchorIndex: number): void {
   if (anchorIndex < 0 || anchorIndex >= MCV_DATA.structure.anchors.length) {
     return;
   }
-  const removedAnchor = MCV_DATA.structure.anchors[anchorIndex];
-  const removedVertexIndex = removedAnchor.vertex;
   MCV_DATA.structure.anchors.splice(anchorIndex, 1);
-  if (removedVertexIndex >= 0 && removedVertexIndex < MCV_DATA.structure.vertices.length) {
-    MCV_DATA.structure.vertices.splice(removedVertexIndex, 1);
+  // Anchor-paired vertex is always at the same index as the anchor.
+  if (anchorIndex >= 0 && anchorIndex < MCV_DATA.structure.vertices.length) {
+    MCV_DATA.structure.vertices.splice(anchorIndex, 1);
   }
-  MCV_DATA.structure.anchors.forEach((anchor, index) => {
-    if (anchor.vertex > removedVertexIndex) {
-      anchor.vertex -= 1;
-    }
-    const vertex = MCV_DATA.structure.vertices[anchor.vertex];
-    if (vertex) {
-      vertex.anchor = index;
-    }
-  });
   MCV_DATA.structure.vertices.forEach((vertex) => {
     if (vertex.anchor !== undefined) {
       if (vertex.anchor === anchorIndex) {
@@ -3319,6 +3260,7 @@ function removeAnchorAtIndex(anchorIndex: number): void {
       }
     }
   });
+  syncAnchorVerticesFromAnchors();
   if (manualAnchorSelectedIndex !== null) {
     if (manualAnchorSelectedIndex === anchorIndex) {
       manualAnchorSelectedIndex = null;
@@ -4326,6 +4268,7 @@ function createManualModeCropResultSvg(
     if (!cropResultCache || !(event.ctrlKey || viewerCtrlHeld)) {
       return;
     }
+    blurFocusedEditableElement();
     const viewPoint = getCropViewPointFromClient(
       event.clientX,
       event.clientY,
@@ -4784,8 +4727,7 @@ function getVertexDotPoint(vertex: StructureVertexData): ManualPoint | null {
 function applyImportedMcvState(data: {
   annotations: ManualAnnotation[];
   opop: Array<ManualAnnotation | null>;
-  anchors: StructureAnchor[];
-  vertices: StructureVertexData[];
+  structure: StructureData;
   source?: McvDataSource;
 }): void {
   MCV_DATA.annotations = data.annotations.map((line) => ({
@@ -4806,17 +4748,37 @@ function applyImportedMcvState(data: {
       ...(line.length !== undefined ? { length: line.length } : {}),
     };
   });
-  MCV_DATA.structure.anchors = data.anchors.map((anchor) => ({
-    from: Geometry.normalizeLineRefs(anchor.from),
-    to: Geometry.normalizeLineRefs(anchor.to),
+  MCV_DATA.structure.lines = data.structure.lines.map((line) => ({
+    from: {
+      x: line.from.x,
+      y: line.from.y,
+      from: [...line.from.from],
+      to: [...line.from.to],
+      ...(line.from.anchor !== undefined ? { anchor: line.from.anchor } : {}),
+      ...(line.from.vertex !== undefined ? { vertex: line.from.vertex } : {}),
+    },
+    to: {
+      x: line.to.x,
+      y: line.to.y,
+      from: [...line.to.from],
+      to: [...line.to.to],
+      ...(line.to.anchor !== undefined ? { anchor: line.to.anchor } : {}),
+      ...(line.to.vertex !== undefined ? { vertex: line.to.vertex } : {}),
+    },
+    axis: line.axis,
+    ...(line.length !== undefined ? { length: line.length } : {}),
+  }));
+  MCV_DATA.structure.anchors = data.structure.anchors.map((anchor) => ({
+    from: [...anchor.from],
+    to: [...anchor.to],
     vertex: anchor.vertex,
     ...(anchor.x !== undefined ? { x: anchor.x } : {}),
     ...(anchor.y !== undefined ? { y: anchor.y } : {}),
     ...(anchor.z !== undefined ? { z: anchor.z } : {}),
   }));
-  MCV_DATA.structure.vertices = data.vertices.map((vertex) => ({
-    from: Geometry.normalizeLineRefs(vertex.from),
-    to: Geometry.normalizeLineRefs(vertex.to),
+  MCV_DATA.structure.vertices = data.structure.vertices.map((vertex) => ({
+    from: [...vertex.from],
+    to: [...vertex.to],
     ...(vertex.anchor !== undefined ? { anchor: vertex.anchor } : {}),
     ...(vertex.x !== undefined ? { x: vertex.x } : {}),
     ...(vertex.y !== undefined ? { y: vertex.y } : {}),
@@ -4827,7 +4789,6 @@ function applyImportedMcvState(data: {
   } else {
     delete MCV_DATA.source;
   }
-  rebuildStructureFromAnnotations();
   manualRedoLines.length = 0;
   manualDraftLine = null;
   manualDragPointerId = null;
@@ -5148,12 +5109,26 @@ async function handleUploadedFile(
     try {
       const parsed = await tryLoadMcvSvgFile(file);
       if (parsed) {
-        const normalized = MediaUtils.normalizeImportedMcvData(parsed.data);
-        if (normalized) {
-          pendingImportedMcvState = normalized;
-          if (normalized.source?.type === "video") {
-            pendingImportedVideoSourceForImageLoad = normalized.source;
+        if (typeof parsed.data === "object" && parsed.data !== null) {
+          const raw = parsed.data as {
+            annotations?: ManualAnnotation[];
+            opop?: Array<ManualAnnotation | null>;
+            structure?: StructureData;
+            source?: McvDataSource;
+          };
+          if (Array.isArray(raw.annotations) && Array.isArray(raw.opop) && raw.structure) {
+            pendingImportedMcvState = {
+              annotations: raw.annotations,
+              opop: raw.opop,
+              structure: raw.structure,
+              ...(raw.source ? { source: raw.source } : {}),
+            };
+            if (raw.source?.type === "video") {
+              pendingImportedVideoSourceForImageLoad = raw.source;
+            }
           }
+        }
+        if (pendingImportedMcvState) {
           openViewer({
             tab: "upload",
             id: "upload-file",
@@ -6029,11 +6004,12 @@ async function stepViewerBySingleFrame(direction: -1 | 1): Promise<void> {
 
 function handleViewerKeybind(event: KeyboardEvent): void {
   const target = event.target as HTMLElement | null;
-  const targetIsEditable =
-    !!target &&
-    (target.tagName === "INPUT" ||
-      target.tagName === "TEXTAREA" ||
-      target.isContentEditable);
+  const targetIsEditable = isEditableElement(target);
+  if (cropResultCache && targetIsEditable && event.key === "Escape") {
+    event.preventDefault();
+    target?.blur();
+    return;
+  }
 
   if (cropResultCache && !targetIsEditable) {
     if (event.ctrlKey && !event.shiftKey && (event.key === "s" || event.key === "S")) {
@@ -6375,6 +6351,85 @@ function handleViewerKeybind(event: KeyboardEvent): void {
   syncViewerTimeInputs(true);
 }
 
+function isEditableElement(element: HTMLElement | null): boolean {
+  if (!element) {
+    return false;
+  }
+  if (element.isContentEditable || element.tagName === "TEXTAREA") {
+    return true;
+  }
+  if (element.tagName !== "INPUT") {
+    return false;
+  }
+  const input = element as HTMLInputElement;
+  const nonTextLikeTypes = new Set([
+    "button",
+    "checkbox",
+    "color",
+    "file",
+    "hidden",
+    "image",
+    "radio",
+    "range",
+    "reset",
+    "submit",
+  ]);
+  return !nonTextLikeTypes.has((input.type || "text").toLowerCase());
+}
+
+function blurFocusedEditableElement(): void {
+  const active = document.activeElement as HTMLElement | null;
+  if (!active || active === document.body) {
+    return;
+  }
+  if (!isEditableElement(active)) {
+    return;
+  }
+  active.blur();
+}
+
+function isViewerToolHotkey(event: KeyboardEvent): boolean {
+  const key = event.key;
+  const lower = key.length === 1 ? key.toLowerCase() : key.toLowerCase();
+  if (event.ctrlKey && !event.shiftKey && (lower === "s" || lower === "z" || lower === "y")) {
+    return true;
+  }
+  if (
+    key === "Tab" ||
+    key === "Escape" ||
+    key === "Enter" ||
+    key === "Delete" ||
+    key === "Backquote" ||
+    key === "," ||
+    key === "." ||
+    key === "ArrowLeft" ||
+    key === "ArrowRight" ||
+    key === "ArrowUp" ||
+    key === "ArrowDown" ||
+    key === "+" ||
+    key === "=" ||
+    key === "-" ||
+    key === "_"
+  ) {
+    return true;
+  }
+  return [
+    "1",
+    "2",
+    "3",
+    "4",
+    "q",
+    "w",
+    "e",
+    "a",
+    "s",
+    "d",
+    "r",
+    "j",
+    "l",
+  ].includes(lower);
+}
+
 function handleSearchEnter(rawInput: string): void {
   const trimmed = rawInput.trim();
   if (!trimmed) {
@@ -6488,14 +6543,63 @@ function installUiHandlers(): void {
       // Ignore shutdown-time cache clear failures.
     });
   });
+  document.addEventListener(
+    "keydown",
+    (event) => {
+      if (!cropResultCache) {
+        return;
+      }
+      if (event.key === "Tab") {
+        event.preventDefault();
+      }
+      const target = event.target as HTMLElement | null;
+      if (isEditableElement(target) || !isViewerToolHotkey(event)) {
+        return;
+      }
+      const active = document.activeElement as HTMLElement | null;
+      if (!active || active === document.body || isEditableElement(active)) {
+        return;
+      }
+      active.blur();
+    },
+    true
+  );
+  document.addEventListener(
+    "focusin",
+    (event) => {
+      if (!cropResultCache) {
+        return;
+      }
+      const target = event.target as HTMLElement | null;
+      if (!target || target === document.body) {
+        return;
+      }
+      if (isEditableElement(target)) {
+        return;
+      }
+      target.blur();
+    },
+    true
+  );
+  const blurOnAnyPointerEvent = (event: PointerEvent) => {
+    if (!cropResultCache) {
+      return;
+    }
+    const cropResultNode = getViewerCropResultNode();
+    const target = event.target as Node | null;
+    if (!cropResultNode || !target || !cropResultNode.contains(target)) {
+      return;
+    }
+    blurFocusedEditableElement();
+  };
+  document.addEventListener("pointerdown", blurOnAnyPointerEvent, true);
+  document.addEventListener("pointermove", blurOnAnyPointerEvent, true);
+  document.addEventListener("pointerup", blurOnAnyPointerEvent, true);
+  document.addEventListener("pointercancel", blurOnAnyPointerEvent, true);
   document.addEventListener("keydown", handleViewerKeybind);
   document.addEventListener("keydown", (event) => {
     const target = event.target as HTMLElement | null;
-    const targetIsEditable =
-      !!target &&
-      (target.tagName === "INPUT" ||
-        target.tagName === "TEXTAREA" ||
-        target.isContentEditable);
+    const targetIsEditable = isEditableElement(target);
     if (event.code === "Backquote" && !targetIsEditable) {
       if (!renderOpopPreviewHeld) {
         renderOpopPreviewHeld = true;
