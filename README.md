@@ -6,7 +6,7 @@ Minecraft Computer Vision (MCV) is a tool for recreating Minecraft player poses 
 
 # Where does it run?
 
-MCV targets both Python and Web and provides maximum flexibility, allowing you to run it entirely online or entirely offline. The web version is a React component that can be embedded in any website, and the Python version is a standalone script that hosts a local Flask server. Both versions have the same core functionality and can be used to label points, solve PnL, and process the data to find positions on tick boundaries and export your findings.
+MCV targets both Python and Web and provides maximum flexibility, allowing you to run it entirely online or entirely offline. The web version is a React component that can be embedded in any website, and the Python version is a standalone script that hosts a local Flask server. Both versions have the same core functionality and can be used to label points, solve PnL, and process the data to find positions on tick boundaries and export your findings. I have a live copy on my website https://dartjs.com/mcv
 
 # Applications
 
@@ -19,15 +19,15 @@ MCV targets both Python and Web and provides maximum flexibility, allowing you t
 Minecraft linearly interpolates player movement between ticks, meaning a single screenshot does not have enough information to determine the location a player actually was on a tick boundary, just a sample along the line they were travelling on.
 However, if you have video and the frame rate is at least 40 FPS, this problem can be solved.
 
-To solve this problem, you first need frame-level tick alignment. The best way to extrapolate this data is through animated textures (like fire) and particle effects (like running particles), because those animations swap frames on each tick boundary. MCV can be used to label these frame-change events by drawing a box around the animated texture one tick before and one tick after it changes, so you can show where the data came from. This tells you which two frames a tick occurred between.
+To solve this problem, you first need frame-level tick alignment. The best way to extrapolate this data is through animated textures (like fire) and particle effects (like running particles), because those animations swap frames on each tick boundary, you can also use suddden changes in direction.
 
-From this, you can isolate which frames lie on a line segment between tick locations. By sampling all available points along a line (2 for 40 FPS+, 3 for 60 FPS+, etc.) for two consecutive line segments, you can find the intersection of those line segments to estimate the tick-boundary location with subframe accuracy using a least-squares regression solver.
+From this, you can isolate which frames lie on a line segment between tick locations. By sampling all available points along a line (2 for 40 FPS+, 3 for 60 FPS+, etc.) for two consecutive line segments, you can find the intersection of those line segments to estimate the tick-boundary location with subframe accuracy using a least-squares regression solver. Ideally you will solve multiple frames all in one go using the constraints that all segments meet at points and the tick phase is a constant.
+
+I have not made a tool for doing this so implementing that is up to you. If you want some help you can contact me through my website https://dartjs.com
 
 # Finding the world coordinates
 
-To find the world coordinates of a point, you can use debug mode (`F3`), stand on top of a corner, look straight down, and crouch to align your cursor with the corner. Your player coordinates will then be the world coordinates of that corner. If you cannot stand directly on top of a block because something is above it, you can either break what is above it and replace it later, or measure a different corner and shift it by the appropriate amount to get the coordinates you want.
-
-In the future, I hope to make either a server-side or client-side tool that lets you walk up to a corner and click it to automatically get world coordinates, or a 3D voxel viewer where you can import a world or structure NBT and click corners to get coordinates.
+To find the world coordinates of a point, you can use debug mode (`F3`), stand on top of a corner, look straight down, and crouch to align your cursor with the corner. Your player coordinates will then be the world coordinates of that corner. If you cannot stand directly on top of a block because something is above it, you can either break what is above it and replace it later, or measure a different corner and shift it by the appropriate amount to get the coordinates you want. Remember that you might see for example 24.9 and that actually means 25 because you always need to round to the nearest integer. Note that the debug crosshair is red, green and blue (just like MCV) and each lines points in the positive direction from their intersection.
 
 # What's included in the repo?
 
