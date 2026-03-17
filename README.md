@@ -120,12 +120,3 @@ Expected output (automatically picked up by the web build):
 Whitelist used for exported JS bindings:
 
 - `build/opencv_js_mcv_whitelist.py`
-
-~~# Coming soon~~
-
-~~I plan to host a version of the tool on my website, https://dartjs.com, specifically for collecting evidence for the Dream controversy so we can crowdsource data collection and publish the data publicly for anyone to analyze. I also plan to analyze the data myself, publish the results, and share them with YouTubers to present the evidence in an easy-to-understand way.~~
-
-~~Let's find out whether or not he cheated together!~~
-
-The highest quality I got from a controlled custom example was 0.0312 blocks or about half a minecraft pixel, which is pretty good! However, the actual footage is heavily compressed and since a lot of the parkour is in enclosed spaces with few features, the accuracy is likely to be worse. This is not enough to determine which jumps were and weren't on the final tick so for the intened application the project has failed. However, the tool is still useful for general pose estimation for any voxel based game/system and map recreation.
-It may actually be useful still with the new updates
